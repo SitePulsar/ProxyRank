@@ -75,14 +75,60 @@ export function Hero() {
   }
 
   return (
-    <section className="relative flex flex-col items-center justify-center min-h-screen px-4 py-24 text-center overflow-hidden">
+    <>
+      {/* Navbar */}
+      <nav className="fixed top-0 inset-x-0 z-50 border-b border-border/40 bg-background/80 backdrop-blur-sm">
+        <div className="container flex h-14 items-center justify-between">
+          <a href="/" className="flex items-center gap-2.5">
+            <svg width="28" height="28" viewBox="0 0 32 32" fill="none" aria-hidden>
+              <circle cx="16" cy="16" r="14" stroke="url(#g1)" strokeWidth="1.2" opacity="0.35"/>
+              <ellipse cx="16" cy="16" rx="14" ry="6" stroke="url(#g1)" strokeWidth="1.2" opacity="0.55" transform="rotate(-35 16 16)"/>
+              <ellipse cx="16" cy="16" rx="14" ry="6" stroke="url(#g1)" strokeWidth="1.2" opacity="0.55" transform="rotate(35 16 16)"/>
+              <line x1="4" y1="6" x2="28" y2="26" stroke="url(#g2)" strokeWidth="1.5" opacity="0.7"/>
+              <circle cx="16" cy="16" r="2.5" fill="url(#g1)"/>
+              <defs>
+                <linearGradient id="g1" x1="0" y1="0" x2="32" y2="32" gradientUnits="userSpaceOnUse">
+                  <stop stopColor="#3B82F6"/>
+                  <stop offset="1" stopColor="#06B6D4"/>
+                </linearGradient>
+                <linearGradient id="g2" x1="4" y1="6" x2="28" y2="26" gradientUnits="userSpaceOnUse">
+                  <stop stopColor="#60A5FA"/>
+                  <stop offset="1" stopColor="#34D399"/>
+                </linearGradient>
+              </defs>
+            </svg>
+            <span className="font-bold text-foreground tracking-tight">ProxyRank</span>
+          </a>
+          <div className="flex items-center gap-4">
+            <a href="/examples" className="text-sm text-muted-foreground hover:text-foreground transition-colors">
+              Examples
+            </a>
+            <a
+              href="https://github.com/SitePulsar/ProxyRank"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-sm text-muted-foreground hover:text-foreground transition-colors"
+            >
+              GitHub
+            </a>
+            <a
+              href="#audit"
+              className="rounded-lg bg-primary px-4 py-1.5 text-sm font-semibold text-primary-foreground hover:opacity-90 transition-opacity"
+            >
+              Run Audit
+            </a>
+          </div>
+        </div>
+      </nav>
+
+    <section id="audit" className="relative flex flex-col items-center justify-center min-h-screen px-4 py-24 text-center overflow-hidden">
       {/* Background glow */}
       <div
         aria-hidden
         className="pointer-events-none absolute inset-0 -z-10"
         style={{
           background:
-            "radial-gradient(ellipse 80% 60% at 50% -10%, oklch(0.568 0.243 264.376 / 0.18), transparent)",
+            "radial-gradient(ellipse 80% 60% at 50% -10%, oklch(0.568 0.243 264.376 / 0.22), transparent)",
         }}
       />
 
@@ -95,7 +141,9 @@ export function Hero() {
       {/* Headline */}
       <h1 className="max-w-3xl text-5xl font-bold tracking-tight text-foreground sm:text-6xl md:text-7xl">
         Make your agent the{" "}
-        <span className="text-primary">first one picked</span>{" "}
+        <span className="bg-gradient-to-r from-blue-400 via-cyan-400 to-emerald-400 bg-clip-text text-transparent">
+          first one picked
+        </span>{" "}
         by orchestrators
       </h1>
 
@@ -240,5 +288,6 @@ export function Hero() {
         </a>
       </p>
     </section>
+    </>
   );
 }
