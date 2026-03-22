@@ -1,0 +1,41 @@
+@import "tailwindcss";
+
+@theme {
+  --color-background: oklch(0.118 0 0);
+  --color-foreground: oklch(0.985 0 0);
+  --color-card: oklch(0.145 0.005 264.376);
+  --color-card-foreground: oklch(0.985 0 0);
+  --color-popover: oklch(0.145 0.005 264.376);
+  --color-popover-foreground: oklch(0.985 0 0);
+  --color-primary: oklch(0.568 0.243 264.376);
+  --color-primary-foreground: oklch(0.985 0 0);
+  --color-secondary: oklch(0.22 0.015 264.376);
+  --color-secondary-foreground: oklch(0.985 0 0);
+  --color-muted: oklch(0.22 0.015 264.376);
+  --color-muted-foreground: oklch(0.65 0.028 264.376);
+  --color-accent: oklch(0.22 0.015 264.376);
+  --color-accent-foreground: oklch(0.985 0 0);
+  --color-destructive: oklch(0.55 0.22 25.723);
+  --color-destructive-foreground: oklch(0.985 0 0);
+  --color-border: oklch(0.25 0.015 264.376);
+  --color-input: oklch(0.22 0.015 264.376);
+  --color-ring: oklch(0.568 0.243 264.376);
+  --radius: 0.5rem;
+
+  /* Score band colors */
+  --color-score-invisible: oklch(0.55 0.22 25.723);  /* red-500 */
+  --color-score-poor: oklch(0.65 0.19 25.723);        /* red-400 */
+  --color-score-emerging: oklch(0.78 0.165 70);       /* yellow-400 */
+  --color-score-discoverable: oklch(0.75 0.18 142);   /* green-400 */
+}
+
+@utility container {
+  margin-inline: auto;
+  padding-inline: 1.5rem;
+  max-width: 88rem;
+}
+
+body {
+  background-color: var(--color-background);
+  color: var(--color-foreground);
+}

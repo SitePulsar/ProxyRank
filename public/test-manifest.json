@@ -1,0 +1,36 @@
+{
+  "schema_version": "v1",
+  "name_for_human": "ProxyRank Test Tool",
+  "name_for_model": "proxyrank_test",
+  "description_for_human": "A test MCP manifest for validating ProxyRank audits.",
+  "description_for_model": "Fetch and analyze web content for AI orchestrators.",
+  "tools": [
+    {
+      "name": "fetch_web_content",
+      "description": "Fetch and parse the HTML content of a web page by URL, returning structured text suitable for AI processing.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "The full URL of the web page to fetch (must include https://)"
+          },
+          "max_length": {
+            "type": "integer",
+            "description": "Maximum number of characters to return (default: 5000)",
+            "default": 5000
+          }
+        },
+        "required": ["url"]
+      },
+      "output": {
+        "type": "object",
+        "description": "Parsed page content with title and body text",
+        "properties": {
+          "title": { "type": "string", "description": "Page title" },
+          "content": { "type": "string", "description": "Main body text" }
+        }
+      }
+    }
+  ]
+}
