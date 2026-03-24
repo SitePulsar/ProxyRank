@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { validateEnv } from "@/lib/env";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { fetchAndParseMCPManifest } from "@/lib/mcp-parser";
+import { fetchAndParseMCPManifest, MCPParseError } from "@/lib/mcp-parser";
 import { connectAndListTools, MCPProtocolError } from "@/lib/mcp-protocol-client";
 import { scoreIntentAlignment } from "@/lib/semantic";
 import { scoreMCPServer } from "@/lib/scorer";
@@ -80,7 +80,13 @@ export async function POST(request: Request): Promise<NextResponse<AuditResponse
           { status: 422 }
         );
       }
-      // Both strategies failed — return a combined message
+      // Propagate specific static error code if available
+      if (staticErr instanceof MCPParseError && staticErr.code !== "FETCH_FAILED") {
+        return NextResponse.json(
+          { error: staticErr.message, code: staticErr.code },
+          { status: 422 }
+        );
+      }
       return NextResponse.json(
         { error: "Could not reach this MCP server. It may require authentication, or the URL may not point to a public MCP endpoint.", code: "FETCH_FAILED" },
         { status: 422 }
