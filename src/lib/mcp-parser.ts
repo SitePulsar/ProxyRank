@@ -72,6 +72,7 @@ export class MCPParseError extends Error {
       | "AUTH_REQUIRED"
       | "HTML_RESPONSE"
       | "NOT_FOUND"
+      | "STDIO_SERVER"
   ) {
     super(message);
     this.name = "MCPParseError";
@@ -158,6 +159,43 @@ function candidateUrls(rawUrl: string): string[] {
     `${base}/agent.json`,
     `${base}/mcp.json`,
   ].filter((u, i, arr) => arr.indexOf(u) === i);
+}
+
+// ─── Stdio server detector ────────────────────────────────────────────────────
+
+/**
+ * For GitHub repo URLs that return NOT_FOUND for all manifest candidates,
+ * check if the repo is a local stdio MCP package (has `bin` or MCP SDK dep).
+ */
+async function detectStdioServer(rawUrl: string): Promise<boolean> {
+  const repoMatch = rawUrl.match(/github\.com\/([^/]+)\/([^/]+)\/?$/);
+  if (!repoMatch) return false;
+  const [, user, repo] = repoMatch;
+
+  for (const branch of ["main", "master"]) {
+    try {
+      const res = await fetch(
+        `https://raw.githubusercontent.com/${user}/${repo}/${branch}/package.json`,
+        { headers: { Accept: "application/json" }, cache: "no-store" }
+      );
+      if (!res.ok) continue;
+      const pkg = await res.json() as Record<string, unknown>;
+      const deps = {
+        ...(pkg.dependencies as Record<string, unknown> ?? {}),
+        ...(pkg.devDependencies as Record<string, unknown> ?? {}),
+      };
+      if (
+        pkg.bin ||
+        "@modelcontextprotocol/sdk" in deps ||
+        "mcp" in deps
+      ) {
+        return true;
+      }
+    } catch {
+      // ignore — just means it's not a Node package
+    }
+  }
+  return false;
 }
 
 // ─── Main parser ──────────────────────────────────────────────────────────────
@@ -284,7 +322,17 @@ export async function fetchAndParseMCPManifest(
     };
   }
 
-  // All candidates failed — throw the last error
+  // All candidates failed — check if it's a stdio package before throwing
+  if (lastError instanceof MCPParseError && lastError.code === "NOT_FOUND") {
+    const isStdio = await detectStdioServer(url);
+    if (isStdio) {
+      throw new MCPParseError(
+        "This is a local stdio MCP server (npm package). It runs on a developer's machine — there is no public HTTP endpoint to audit.",
+        "STDIO_SERVER"
+      );
+    }
+  }
+
   throw (
     lastError ??
     new MCPParseError(`Could not find a valid MCP manifest at ${url}`, "FETCH_FAILED")

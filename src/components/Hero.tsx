@@ -261,6 +261,11 @@ export function Hero() {
                 Fix: make sure your server exposes <code className="bg-card px-1 rounded">/.well-known/mcp.json</code> or <code className="bg-card px-1 rounded">/mcp</code> as a public endpoint.
               </p>
             )}
+            {errorCode === "STDIO_SERVER" && (
+              <p className="text-xs text-muted-foreground">
+                Stdio servers run locally and have no public URL. To get a ProxyScore, deploy it as an HTTP server or publish a static <code className="bg-card px-1 rounded">mcp.json</code> manifest to your repo.
+              </p>
+            )}
             {(errorCode === "FETCH_FAILED" || errorCode === "HTML_RESPONSE" || errorCode === "NOT_FOUND") && (
               <p className="text-xs text-muted-foreground">
                 Try a working example:{" "}
