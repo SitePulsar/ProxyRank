@@ -186,7 +186,8 @@ export function Hero() {
         {mode === "mcp" ? (
           <div className="flex flex-col gap-2">
             <p className="text-xs text-muted-foreground text-left">
-              Works with <strong className="text-foreground">public HTTP endpoints</strong> — your dev, staging, or production server URL. Enterprise servers (Stripe, Slack, GitHub) require auth and cannot be audited.
+              Works with <strong className="text-foreground">public HTTP endpoints</strong> — your dev, staging, or production server URL. Enterprise servers (Stripe, Slack, GitHub) require auth and cannot be audited.{" "}
+              Don't have a server yet? Try one of the public examples below to see how scoring works.
             </p>
             <div className="flex flex-col gap-3 sm:flex-row">
             <input
