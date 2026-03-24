@@ -112,12 +112,6 @@ export function Hero() {
             >
               GitHub
             </a>
-            <a
-              href="#audit"
-              className="rounded-lg bg-primary px-4 py-1.5 text-sm font-semibold text-primary-foreground hover:opacity-90 transition-opacity"
-            >
-              Run Audit
-            </a>
           </div>
         </div>
       </nav>
@@ -292,7 +286,6 @@ export function Hero() {
         <div className="mt-4 flex flex-wrap justify-center gap-2">
           <span className="text-xs text-muted-foreground self-center">Try a public server:</span>
           {[
-            { label: "1stDibs", url: "https://www.1stdibs.com/soa/mcp/" },
             { label: "Stayker Hotels", url: "https://mcp.stayker.com/mcp" },
             { label: "0nMCP", url: "https://0nmcp.com/api/mcp" },
             { label: "123elec", url: "https://mcp.123elec.com/mcp" },
