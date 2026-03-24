@@ -23,9 +23,10 @@ export function Hero() {
   const [cliName, setCliName] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [errorCode, setErrorCode] = useState<string | null>(null);
 
   function clearError() {
-    if (error) setError(null);
+    if (error) { setError(null); setErrorCode(null); }
   }
 
   async function handleSubmit(e: FormEvent<HTMLFormElement>) {
@@ -45,7 +46,7 @@ export function Hero() {
           body: JSON.stringify({ url: trimmed }),
         });
         const data = await res.json();
-        if (!res.ok) { setError(data.error ?? "Something went wrong."); return; }
+        if (!res.ok) { setError(data.error ?? "Something went wrong."); setErrorCode(data.code ?? null); return; }
         router.push(`/results/${data.auditId}`);
       } catch {
         setError("Network error — check your connection and try again.");
@@ -236,11 +237,43 @@ export function Hero() {
           </div>
         )}
 
-        {/* Error message */}
+        {/* Error diagnosis */}
         {error && (
-          <p className="text-sm text-destructive text-left" role="alert">
-            {error}
-          </p>
+          <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-3 text-left space-y-2" role="alert">
+            <p className="text-sm font-medium text-destructive">{error}</p>
+            {errorCode === "LOCALHOST_BLOCKED" && (
+              <p className="text-xs text-muted-foreground">
+                Fix: run <code className="bg-card px-1 rounded">ngrok http 3000</code> in your terminal, then paste the ngrok URL here.
+              </p>
+            )}
+            {errorCode === "AUTH_REQUIRED" && (
+              <p className="text-xs text-muted-foreground">
+                Fix: make the manifest file public, or host it on a public Gist. Private manifests are also invisible to orchestrators.
+              </p>
+            )}
+            {errorCode === "HTML_RESPONSE" && (
+              <p className="text-xs text-muted-foreground">
+                Fix: if this is a GitHub link, use the <strong>Raw</strong> URL (click Raw on the file page), or paste a direct <code className="bg-card px-1 rounded">.json</code> URL.
+              </p>
+            )}
+            {errorCode === "NOT_FOUND" && (
+              <p className="text-xs text-muted-foreground">
+                Fix: make sure your server exposes <code className="bg-card px-1 rounded">/.well-known/mcp.json</code> or <code className="bg-card px-1 rounded">/mcp</code> as a public endpoint.
+              </p>
+            )}
+            {(errorCode === "FETCH_FAILED" || errorCode === "HTML_RESPONSE" || errorCode === "NOT_FOUND") && (
+              <p className="text-xs text-muted-foreground">
+                Try a working example:{" "}
+                <button
+                  type="button"
+                  onClick={() => { setUrl("https://mcp.123elec.com/mcp"); setError(null); setErrorCode(null); }}
+                  className="text-primary underline hover:no-underline"
+                >
+                  123elec MCP
+                </button>
+              </p>
+            )}
+          </div>
         )}
       </form>
 

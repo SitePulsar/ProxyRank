@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { validateEnv } from "@/lib/env";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { fetchAndParseMCPManifest, MCPParseError } from "@/lib/mcp-parser";
+import { fetchAndParseMCPManifest } from "@/lib/mcp-parser";
 import { connectAndListTools, MCPProtocolError } from "@/lib/mcp-protocol-client";
 import { scoreIntentAlignment } from "@/lib/semantic";
 import { scoreMCPServer } from "@/lib/scorer";
@@ -40,6 +40,27 @@ export async function POST(request: Request): Promise<NextResponse<AuditResponse
   }
 
   const { url } = parsed.data;
+
+  // Block localhost — Vercel cannot reach private machines
+  try {
+    const { hostname } = new URL(url);
+    if (
+      hostname === "localhost" ||
+      hostname === "127.0.0.1" ||
+      hostname === "0.0.0.0" ||
+      hostname.endsWith(".local")
+    ) {
+      return NextResponse.json(
+        {
+          error: "ProxyRank runs in the cloud and cannot reach localhost. Use ngrok to create a public tunnel (ngrok http 3000) and paste the ngrok URL instead.",
+          code: "LOCALHOST_BLOCKED",
+        },
+        { status: 422 }
+      );
+    }
+  } catch {
+    // URL already validated above
+  }
 
   // Strategy 1: try static manifest (fast, works for .json URLs)
   // Strategy 2: fall back to live MCP protocol client (JSON-RPC tools/list)

@@ -69,6 +69,9 @@ export class MCPParseError extends Error {
       | "INVALID_JSON"
       | "INVALID_SCHEMA"
       | "TIMEOUT"
+      | "AUTH_REQUIRED"
+      | "HTML_RESPONSE"
+      | "NOT_FOUND"
   ) {
     super(message);
     this.name = "MCPParseError";
@@ -102,18 +105,55 @@ export function selectPrimaryTool(manifest: MCPManifest): MCPTool {
   });
 }
 
+// ─── GitHub URL normalizer ────────────────────────────────────────────────────
+
+/**
+ * Converts GitHub UI URLs to raw.githubusercontent.com equivalents so the
+ * parser can fetch the actual JSON instead of an HTML page.
+ *
+ * Handles:
+ *   github.com/user/repo/blob/branch/path/to/file.json
+ *     → raw.githubusercontent.com/user/repo/branch/path/to/file.json
+ */
+function normalizeGitHubUrl(url: string): string {
+  const blobMatch = url.match(
+    /github\.com\/([^/]+)\/([^/]+)\/blob\/([^/]+)\/(.+)/
+  );
+  if (blobMatch) {
+    const [, user, repo, branch, path] = blobMatch;
+    return `https://raw.githubusercontent.com/${user}/${repo}/${branch}/${path}`;
+  }
+  return url;
+}
+
 // ─── Manifest URLs to try ─────────────────────────────────────────────────────
 
 function candidateUrls(rawUrl: string): string[] {
-  const base = rawUrl.replace(/\/$/, "");
+  const normalized = normalizeGitHubUrl(rawUrl);
+  const base = normalized.replace(/\/$/, "");
 
   // If URL already points directly to a JSON file, only try it as-is
   if (/\.json$/i.test(base)) {
-    return [rawUrl];
+    return [normalized];
+  }
+
+  // GitHub repo root → try known raw paths on main + master
+  const repoMatch = normalized.match(
+    /github\.com\/([^/]+)\/([^/]+)\/?$/
+  );
+  if (repoMatch) {
+    const [, user, repo] = repoMatch;
+    const raw = `https://raw.githubusercontent.com/${user}/${repo}`;
+    return [
+      `${raw}/main/mcp.json`,
+      `${raw}/main/.well-known/mcp.json`,
+      `${raw}/master/mcp.json`,
+      `${raw}/master/.well-known/mcp.json`,
+    ];
   }
 
   return [
-    rawUrl,
+    normalized,
     `${base}/.well-known/mcp.json`,
     `${base}/agent.json`,
     `${base}/mcp.json`,
@@ -166,9 +206,31 @@ export async function fetchAndParseMCPManifest(
     }
 
     if (!res.ok) {
+      if (res.status === 401 || res.status === 403) {
+        lastError = new MCPParseError(
+          `Access denied (${res.status}) — this manifest is private. Orchestrators cannot discover it either. Make the file public to get a ProxyScore.`,
+          "AUTH_REQUIRED"
+        );
+      } else if (res.status === 404) {
+        lastError = new MCPParseError(
+          `No manifest found at ${candidate}. Check the URL or try adding /.well-known/mcp.json to your domain.`,
+          "NOT_FOUND"
+        );
+      } else {
+        lastError = new MCPParseError(
+          `HTTP ${res.status} from ${candidate}`,
+          "FETCH_FAILED"
+        );
+      }
+      continue;
+    }
+
+    // Detect HTML response (GitHub UI page, login wall, etc.)
+    const contentType = res.headers.get("content-type") ?? "";
+    if (contentType.includes("text/html")) {
       lastError = new MCPParseError(
-        `HTTP ${res.status} from ${candidate}`,
-        "FETCH_FAILED"
+        `Got an HTML page instead of JSON from ${candidate}. You may have pasted a webpage URL — try the raw JSON link instead.`,
+        "HTML_RESPONSE"
       );
       continue;
     }
@@ -178,6 +240,14 @@ export async function fetchAndParseMCPManifest(
     let json: unknown;
     try {
       raw = await res.text();
+      // Secondary HTML check — some servers return HTML with 200 OK
+      if (raw.trimStart().startsWith("<!")) {
+        lastError = new MCPParseError(
+          `Got an HTML page instead of JSON from ${candidate}. You may have pasted a webpage URL — try the raw JSON link instead.`,
+          "HTML_RESPONSE"
+        );
+        continue;
+      }
       json = JSON.parse(raw);
     } catch {
       lastError = new MCPParseError(

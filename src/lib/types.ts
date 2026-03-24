@@ -147,7 +147,7 @@ export interface AuditResponse {
 
 export interface AuditError {
   error: string;
-  code: "INVALID_URL" | "FETCH_FAILED" | "INVALID_JSON" | "INVALID_SCHEMA" | "TIMEOUT" | "INTERNAL";
+  code: "INVALID_URL" | "FETCH_FAILED" | "INVALID_JSON" | "INVALID_SCHEMA" | "TIMEOUT" | "INTERNAL" | "LOCALHOST_BLOCKED" | "AUTH_REQUIRED" | "HTML_RESPONSE" | "NOT_FOUND";
 }
 
 // ─── CLI Tool shapes ───────────────────────────────────────────────────────────
