@@ -190,12 +190,16 @@ export function Hero() {
         noValidate
       >
         {mode === "mcp" ? (
-          <div className="flex flex-col gap-3 sm:flex-row">
+          <div className="flex flex-col gap-2">
+            <p className="text-xs text-muted-foreground text-left">
+              Works with <strong className="text-foreground">public HTTP endpoints</strong> — your dev, staging, or production server URL. Enterprise servers (Stripe, Slack, GitHub) require auth and cannot be audited.
+            </p>
+            <div className="flex flex-col gap-3 sm:flex-row">
             <input
               type="url"
               value={url}
               onChange={(e) => { setUrl(e.target.value); clearError(); }}
-              placeholder="https://your-agent.com/.well-known/mcp.json"
+              placeholder="https://your-server.com/mcp  or  https://your-server.com/.well-known/mcp.json"
               disabled={isLoading}
               className="flex-1 rounded-lg border border-border bg-card px-4 py-3 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary disabled:opacity-50"
               aria-label="MCP server URL"
@@ -207,6 +211,7 @@ export function Hero() {
             >
               {isLoading ? <><Loader2 className="h-4 w-4 animate-spin" />Auditing…</> : <>Audit my agent<ArrowRight className="h-4 w-4" /></>}
             </button>
+            </div>
           </div>
         ) : (
           <div className="space-y-3 text-left">
