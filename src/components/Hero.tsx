@@ -294,7 +294,26 @@ export function Hero() {
             <button
               key={label}
               type="button"
-              onClick={() => { setUrl(exampleUrl); setError(null); }}
+              onClick={async () => {
+                setUrl(exampleUrl);
+                setError(null);
+                setErrorCode(null);
+                setIsLoading(true);
+                try {
+                  const res = await fetch("/api/audit", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ url: exampleUrl }),
+                  });
+                  const data = await res.json();
+                  if (!res.ok) { setError(data.error ?? "Something went wrong."); setErrorCode(data.code ?? null); return; }
+                  router.push(`/results/${data.auditId}`);
+                } catch {
+                  setError("Network error — check your connection and try again.");
+                } finally {
+                  setIsLoading(false);
+                }
+              }}
               className="rounded-full border border-border bg-card px-3 py-1 text-xs text-muted-foreground hover:text-foreground hover:border-primary transition-colors"
             >
               {label}
