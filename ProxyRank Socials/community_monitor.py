@@ -4,10 +4,10 @@ community_monitor.py — ProxyRank.ai community signal monitor
 
 Polls HN (Algolia), Reddit (JSON API), and X (Twitter API v2) for keywords
 relevant to ProxyRank.ai. Drafts developer-friendly replies using Grok, then
-routes them through Telegram for human review before posting.
+routes them through Telegram and/or Discord for human review before posting.
 
 Schedule : every 3 hours
-Platforms: Telegram (active) — Discord: TODO, add later
+Platforms: Telegram (active), Discord (active)
 
 Required .env:
     GROK_API_KEY
@@ -15,6 +15,8 @@ Required .env:
     TELEGRAM_CHAT_ID
 
 Optional .env:
+    DISCORD_BOT_TOKEN   — enables Discord routing
+    DISCORD_CHANNEL_ID  — channel to send hits to
     X_BEARER_TOKEN      — enables X search (read-only)
     X_API_KEY           — OAuth1.0a for posting replies to X
     X_API_SECRET
@@ -54,6 +56,9 @@ load_dotenv()
 GROK_API_KEY       = os.getenv("GROK_API_KEY", "")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN_COMMUNITY_MONITOR", "")
 TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "")
+
+DISCORD_BOT_TOKEN  = os.getenv("DISCORD_BOT_TOKEN", "")
+DISCORD_CHANNEL_ID = os.getenv("DISCORD_CHANNEL_ID", "")
 
 # X: Bearer token for read; OAuth1.0a keys for posting replies
 X_BEARER_TOKEN  = os.getenv("X_BEARER_TOKEN", "")
@@ -644,13 +649,189 @@ class CommunityBot:
                 time.sleep(5)
 
 
+# ── Discord bot ────────────────────────────────────────────────────────────
+
+class DiscordBot:
+    """
+    Posts hits to a Discord channel and polls for reply-based commands.
+
+    User replies to a hit message with:
+      send              — post the draft as-is
+      skip              — discard this hit
+      tweak: <instr>    — regenerate the draft with the given instruction
+    """
+
+    DISCORD_API = "https://discord.com/api/v10"
+
+    def __init__(self, token: str, channel_id: str) -> None:
+        self._token      = token
+        self._channel_id = channel_id
+        self._headers    = {
+            "Authorization": f"Bot {token}",
+            "Content-Type":  "application/json",
+        }
+        self._last_msg_id: str = "0"
+        self._pending: dict    = {}  # parent_message_id → hit+draft session
+
+    def _api(self, method: str, path: str, **kwargs) -> dict | list:
+        url = f"{self.DISCORD_API}{path}"
+        try:
+            resp = requests.request(method, url, headers=self._headers,
+                                    timeout=10, **kwargs)
+            if resp.status_code == 429:
+                retry_after = resp.json().get("retry_after", 1)
+                time.sleep(float(retry_after))
+                return {}
+            resp.raise_for_status()
+            return resp.json() if resp.text else {}
+        except Exception as e:
+            print(f"⚠️  Discord API error ({method} {path}): {e}")
+            return {}
+
+    def _send(self, content: str, reply_to: str | None = None) -> str:
+        """Post a message; returns the new message ID or empty string."""
+        payload: dict = {"content": content}
+        if reply_to:
+            payload["message_reference"] = {"message_id": reply_to}
+        result = self._api("POST", f"/channels/{self._channel_id}/messages",
+                           json=payload)
+        return result.get("id", "") if isinstance(result, dict) else ""
+
+    # ── Send a new hit ────────────────────────────────────────────────────
+
+    def send_hit(self, hit: dict, draft: str) -> None:
+        source_icon  = {"hn": "🔶", "reddit": "🟠", "x": "🐦"}.get(hit["source"], "📡")
+        source_label = {
+            "hn":     "Hacker News",
+            "reddit": f"r/{hit.get('subreddit', 'reddit')}",
+            "x":      "Twitter/X",
+        }.get(hit["source"], hit["source"])
+
+        content = (
+            f"{source_icon} **{source_label}**  ·  `{hit['keyword']}`\n\n"
+            f"**{hit['title']}**\n"
+            f"{hit['url']}\n\n"
+            f"💬 **Suggested reply:**\n"
+            f">>> {draft}\n\n"
+            f"*Reply to this message: `send` · `skip` · `tweak: your instruction`*"
+        )
+        msg_id = self._send(content)
+        if msg_id:
+            self._pending[msg_id] = {**hit, "draft": draft}
+            print(f"💬 Discord: sent [{hit['source']}] {hit['title'][:65]}")
+
+    # ── Poll for replies ──────────────────────────────────────────────────
+
+    def poll(self) -> None:
+        """Long-poll the Discord channel for new messages. Runs in a daemon thread."""
+        print("📡 Discord poll started")
+        # Seed last_msg_id so we don't replay old messages on startup
+        msgs = self._api("GET", f"/channels/{self._channel_id}/messages",
+                         params={"limit": 1})
+        if isinstance(msgs, list) and msgs:
+            self._last_msg_id = msgs[0]["id"]
+
+        while True:
+            try:
+                msgs = self._api("GET", f"/channels/{self._channel_id}/messages",
+                                 params={"after": self._last_msg_id, "limit": 100})
+                if isinstance(msgs, list):
+                    for msg in reversed(msgs):   # oldest first
+                        self._last_msg_id = msg["id"]
+                        self._handle_message(msg)
+            except Exception as e:
+                print(f"⚠️  Discord poll error: {e}")
+            time.sleep(3)
+
+    def _handle_message(self, msg: dict) -> None:
+        ref       = msg.get("message_reference", {})
+        parent_id = ref.get("message_id")
+        if not parent_id or parent_id not in self._pending:
+            return
+
+        text    = msg.get("content", "").strip()
+        cmd     = text.lower().split(":")[0].strip()
+        session = self._pending[parent_id]
+
+        if cmd == "skip":
+            self._pending.pop(parent_id, None)
+            self._send("⏭️ Skipped.", reply_to=msg["id"])
+
+        elif cmd == "send":
+            self._do_post(parent_id, session, msg["id"])
+
+        elif cmd == "tweak":
+            instruction = text[text.index(":") + 1:].strip() if ":" in text else ""
+            if not instruction:
+                self._send("Usage: `tweak: your instruction here`", reply_to=msg["id"])
+                return
+            self._send("✍️ Rewriting…", reply_to=msg["id"])
+            system = (
+                "You are a developer replying to posts on HN, Reddit, and Twitter/X. "
+                "Rewrite the draft reply according to the user's instruction. "
+                "Keep it 2–3 sentences, developer-to-developer, no emojis, no self-promotion."
+            )
+            user_prompt = (
+                f"Original draft:\n{session['draft']}\n\n"
+                f"Instruction: {instruction}\n\n"
+                "Rewritten reply:"
+            )
+            new_draft = _call_grok(system, user_prompt)
+            if not new_draft:
+                self._send("❌ Couldn't rewrite. Try again.", reply_to=msg["id"])
+                return
+            session["draft"] = new_draft
+            source_icon = {"hn": "🔶", "reddit": "🟠", "x": "🐦"}.get(session["source"], "📡")
+            self._send(
+                f"{source_icon} **Revised reply:**\n>>> {new_draft}\n\n"
+                f"*Reply with `send` or `skip`*",
+                reply_to=msg["id"],
+            )
+
+    def _do_post(self, parent_id: str, session: dict, reply_to_id: str) -> None:
+        source = session["source"]
+        draft  = session["draft"]
+        url    = session["url"]
+
+        if source == "x":
+            tweet_id = session.get("tweet_id", "")
+            if all([X_API_KEY, X_API_SECRET, X_ACCESS_TOKEN, X_ACCESS_SECRET]):
+                ok = _post_reply_x(tweet_id, draft)
+                if ok:
+                    self._send(f"✅ Reply posted to X!\n{url}", reply_to=reply_to_id)
+                else:
+                    self._send(
+                        f"❌ X post failed — copy manually:\n```\n{draft}\n```\n{url}",
+                        reply_to=reply_to_id,
+                    )
+            else:
+                self._send(
+                    f"📋 **Post on X:**\n```\n{draft}\n```\n{url}",
+                    reply_to=reply_to_id,
+                )
+        elif source == "reddit":
+            self._send(
+                f"📋 **Post on Reddit:**\n```\n{draft}\n```\n{url}",
+                reply_to=reply_to_id,
+            )
+        elif source == "hn":
+            hn_comment_url = f"https://news.ycombinator.com/item?id={session.get('hn_id', '')}"
+            self._send(
+                f"📋 **Post on HN:**\n```\n{draft}\n```\n{hn_comment_url}",
+                reply_to=reply_to_id,
+            )
+
+        self._pending.pop(parent_id, None)
+
+
 # ── Monitor job ────────────────────────────────────────────────────────────
 
 _bot: CommunityBot | None = None
+_discord_bot: DiscordBot | None = None
 
 
 def run_monitor() -> None:
-    global _bot
+    global _bot, _discord_bot
     now = datetime.now(CET).strftime("%Y-%m-%d %H:%M CET")
     print(f"\n🔍 Monitor run — {now}")
 
@@ -672,20 +853,25 @@ def run_monitor() -> None:
     _save_seen(seen)
     print(f"  {len(all_hits)} new hit(s) found")
 
-    if not all_hits or _bot is None:
+    if not all_hits:
         return
 
     for hit in all_hits:
         draft = draft_reply(hit)
-        if draft:
+        if not draft:
+            continue
+        if _bot is not None:
             _bot.send_hit(hit, draft)
-        time.sleep(1.2)  # avoid Telegram flood limits
+            time.sleep(1.2)  # avoid Telegram flood limits
+        if _discord_bot is not None:
+            _discord_bot.send_hit(hit, draft)
+            time.sleep(0.5)
 
 
 # ── Entry point ────────────────────────────────────────────────────────────
 
 def main() -> None:
-    global _bot
+    global _bot, _discord_bot
 
     missing = [v for v in ("GROK_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID")
                if not os.getenv(v)]
@@ -697,9 +883,17 @@ def main() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
     _bot = CommunityBot()
-
     poll_thread = threading.Thread(target=_bot.poll, daemon=True, name="tg-poll")
     poll_thread.start()
+
+    if DISCORD_BOT_TOKEN and DISCORD_CHANNEL_ID:
+        _discord_bot = DiscordBot(DISCORD_BOT_TOKEN, DISCORD_CHANNEL_ID)
+        discord_thread = threading.Thread(target=_discord_bot.poll,
+                                          daemon=True, name="discord-poll")
+        discord_thread.start()
+        print(f"💬 Discord routing enabled → channel {DISCORD_CHANNEL_ID}")
+    else:
+        print("ℹ️  Discord routing disabled (set DISCORD_BOT_TOKEN + DISCORD_CHANNEL_ID to enable)")
 
     # Run immediately on startup, then every 3 hours
     run_monitor()
