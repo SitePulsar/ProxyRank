@@ -60,8 +60,8 @@ TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "")
 DISCORD_BOT_TOKEN  = os.getenv("DISCORD_BOT_TOKEN", "")
 DISCORD_CHANNEL_ID = os.getenv("DISCORD_CHANNEL_ID", "")
 
-# X: Bearer token for read; OAuth1.0a keys for posting replies
-X_BEARER_TOKEN  = os.getenv("X_BEARER_TOKEN", "")
+# X: Bearer token for read — URL-decode in case it was pasted URL-encoded
+X_BEARER_TOKEN  = urllib.parse.unquote(os.getenv("X_BEARER_TOKEN", ""))
 X_API_KEY       = os.getenv("X_API_KEY", "")
 X_API_SECRET    = os.getenv("X_API_SECRET", "")
 X_ACCESS_TOKEN  = os.getenv("X_ACCESS_TOKEN", "")
@@ -73,6 +73,7 @@ CET       = pytz.timezone("Europe/Amsterdam")
 
 # ── Keywords & sources ─────────────────────────────────────────────────────
 
+# Primary keywords to search for
 KEYWORDS = [
     "MCP",
     "ProxyRank",
@@ -80,6 +81,16 @@ KEYWORDS = [
     "AI agent",
     "CLI tool",
 ]
+
+# If a hit's title+snippet contains any of these, skip it (false positive filter)
+EXCLUDE_KEYWORDS = [
+    "wildfire", "forest fire", "climate", "election", "war", "military",
+    "killed", "attack", "hospital", "vaccine", "drug", "cancer",
+    "children", "Gaza", "Jenin", "Ukraine", "Russia",
+]
+
+# Max hits sent per monitor run (prevents message overload)
+MAX_HITS_PER_RUN = 5
 
 SUBREDDITS = [
     "artificial",
@@ -106,8 +117,9 @@ X_POST_URL    = "https://api.twitter.com/2/tweets"
 
 # ── State file paths ───────────────────────────────────────────────────────
 
-COMMUNITY_STATE_PATH = DATA_DIR / "community_state.json"
-SESSION_STATE_PATH   = DATA_DIR / "community_sessions_state.json"
+COMMUNITY_STATE_PATH        = DATA_DIR / "community_state.json"
+SESSION_STATE_PATH          = DATA_DIR / "community_sessions_state.json"
+DISCORD_SESSION_STATE_PATH  = DATA_DIR / "discord_sessions_state.json"
 
 # ── Atomic write ───────────────────────────────────────────────────────────
 
@@ -174,13 +186,15 @@ def _fetch_hn(seen: set) -> list:
                     continue
                 seen.add(uid)
                 hits.append({
-                    "uid":     uid,
-                    "source":  "hn",
-                    "title":   hit.get("title") or hit.get("story_title") or "(no title)",
-                    "url":     hit.get("url") or f"https://news.ycombinator.com/item?id={hit['objectID']}",
-                    "hn_id":   hit["objectID"],
-                    "snippet": (hit.get("story_text") or "")[:400],
-                    "keyword": kw,
+                    "uid":      uid,
+                    "source":   "hn",
+                    "title":    hit.get("title") or hit.get("story_title") or "(no title)",
+                    "url":      hit.get("url") or f"https://news.ycombinator.com/item?id={hit['objectID']}",
+                    "hn_id":    hit["objectID"],
+                    "snippet":  (hit.get("story_text") or "")[:400],
+                    "keyword":  kw,
+                    "points":   hit.get("points") or 0,
+                    "comments": hit.get("num_comments") or 0,
                 })
         except Exception as e:
             print(f"⚠️  HN fetch error ({kw!r}): {e}")
@@ -329,17 +343,28 @@ def draft_reply(hit: dict) -> str:
     }.get(hit["source"], hit["source"])
 
     system = (
-        "You are a developer replying to posts on HN, Reddit, and Twitter/X. "
-        "Write a 2–3 sentence reply that is genuinely helpful and developer-to-developer. "
-        "Be direct and specific — no platitudes, no emojis, no self-promotion. "
-        "Only mention ProxyRank.ai if it is directly and naturally relevant, never forced."
+        "You are a real developer who has been building with MCP servers, AI agents, and CLI tools "
+        "for the past couple of years. You reply to posts on HN, Reddit, and Twitter/X from your own "
+        "genuine experience — not as a marketer or bot.\n\n"
+        "Rules for sounding human:\n"
+        "- Write like you're typing fast, not composing an essay. Vary sentence length.\n"
+        "- Draw on a specific personal experience, opinion, or tradeoff you've actually faced.\n"
+        "- Use contractions (don't, I've, it's, you'd).\n"
+        "- Be slightly opinionated — real devs have takes.\n"
+        "- Reference concrete details from the post itself, not generic platitudes.\n"
+        "- One natural follow-up question max, only if it adds value.\n"
+        "- Do NOT start with 'Hey', 'Great', 'Interesting', 'I', or a compliment.\n"
+        "- Do NOT ask about scalability, caching, or edge cases generically.\n"
+        "- No emojis, no bullet points, no self-promotion.\n"
+        "- Keep it 2–3 sentences. Shorter is more human.\n"
+        "- Only mention ProxyRank.ai if it's directly relevant and would genuinely help them."
     )
     user = (
         f"Platform: {source_label}\n"
         f"Post title: {hit['title']}\n"
         f"Keyword match: {hit['keyword']}\n"
         f"Content snippet: {hit['snippet']}\n\n"
-        "Draft a reply:"
+        "Write a reply that could pass as a real developer who's been in the weeds on this topic:"
     )
     return _call_grok(system, user)
 
@@ -425,7 +450,9 @@ class CommunityBot:
 
     def _tg(self, method: str, **kwargs) -> dict:
         try:
-            r = requests.post(f"{TELEGRAM_BASE}/{method}", json=kwargs, timeout=10)
+            # getUpdates uses long-polling (timeout=30 inside kwargs) — give extra buffer
+            http_timeout = kwargs.get("timeout", 10) + 5 if method == "getUpdates" else 10
+            r = requests.post(f"{TELEGRAM_BASE}/{method}", json=kwargs, timeout=http_timeout)
             result = r.json()
             if not result.get("ok"):
                 print(f"⚠️  Telegram {method}: {result.get('description', result)}")
@@ -672,6 +699,20 @@ class DiscordBot:
         }
         self._last_msg_id: str = "0"
         self._pending: dict    = {}  # parent_message_id → hit+draft session
+        self._load()
+
+    def _save(self) -> None:
+        _atomic_write_json(DISCORD_SESSION_STATE_PATH, self._pending)
+
+    def _load(self) -> None:
+        if DISCORD_SESSION_STATE_PATH.exists():
+            try:
+                data = json.loads(DISCORD_SESSION_STATE_PATH.read_text(encoding="utf-8"))
+                self._pending = data
+                if data:
+                    print(f"♻️  Discord: restored {len(data)} pending session(s) from disk.")
+            except Exception:
+                pass
 
     def _api(self, method: str, path: str, **kwargs) -> dict | list:
         url = f"{self.DISCORD_API}{path}"
@@ -707,17 +748,27 @@ class DiscordBot:
             "x":      "Twitter/X",
         }.get(hit["source"], hit["source"])
 
-        content = (
-            f"{source_icon} **{source_label}**  ·  `{hit['keyword']}`\n\n"
+        # For HN, show both the article URL and the comment thread URL
+        if hit["source"] == "hn":
+            hn_thread = f"https://news.ycombinator.com/item?id={hit.get('hn_id', '')}"
+            links = f"{hit['url']}\n💬 Post reply here → {hn_thread}"
+        elif hit["source"] == "reddit":
+            links = f"Post reply here → {hit['url']}"
+        else:
+            links = hit["url"]
+
+        card = (
+            f"{source_icon} **{source_label}**  ·  `{hit['keyword']}`\n"
             f"**{hit['title']}**\n"
-            f"{hit['url']}\n\n"
-            f"💬 **Suggested reply:**\n"
-            f">>> {draft}\n\n"
-            f"*Reply to this message: `send` · `skip` · `tweak: your instruction`*"
+            f"{links}\n\n"
+            f"*Reply to the text below: `send` · `skip` · `tweak: instruction`*"
         )
-        msg_id = self._send(content)
+        card_id = self._send(card)
+        # Send draft as a plain follow-up — easy to long-press and copy on mobile
+        msg_id = self._send(draft, reply_to=card_id) if card_id else self._send(draft)
         if msg_id:
             self._pending[msg_id] = {**hit, "draft": draft}
+            self._save()
             print(f"💬 Discord: sent [{hit['source']}] {hit['title'][:65]}")
 
     # ── Poll for replies ──────────────────────────────────────────────────
@@ -755,6 +806,7 @@ class DiscordBot:
 
         if cmd == "skip":
             self._pending.pop(parent_id, None)
+            self._save()
             self._send("⏭️ Skipped.", reply_to=msg["id"])
 
         elif cmd == "send":
@@ -781,12 +833,16 @@ class DiscordBot:
                 self._send("❌ Couldn't rewrite. Try again.", reply_to=msg["id"])
                 return
             session["draft"] = new_draft
+            self._save()
             source_icon = {"hn": "🔶", "reddit": "🟠", "x": "🐦"}.get(session["source"], "📡")
-            self._send(
-                f"{source_icon} **Revised reply:**\n>>> {new_draft}\n\n"
-                f"*Reply with `send` or `skip`*",
+            note_id = self._send(
+                f"{source_icon} **Revised reply** — long-press the text below to copy:",
                 reply_to=msg["id"],
             )
+            new_msg_id = self._send(new_draft, reply_to=note_id) if note_id else self._send(new_draft)
+            if new_msg_id:
+                self._pending[new_msg_id] = session
+                self._save()
 
     def _do_post(self, parent_id: str, session: dict, reply_to_id: str) -> None:
         source = session["source"]
@@ -822,6 +878,7 @@ class DiscordBot:
             )
 
         self._pending.pop(parent_id, None)
+        self._save()
 
 
 # ── Monitor job ────────────────────────────────────────────────────────────
@@ -830,12 +887,12 @@ _bot: CommunityBot | None = None
 _discord_bot: DiscordBot | None = None
 
 
-def run_monitor() -> None:
+def run_monitor(test: bool = False) -> None:
     global _bot, _discord_bot
     now = datetime.now(CET).strftime("%Y-%m-%d %H:%M CET")
-    print(f"\n🔍 Monitor run — {now}")
+    print(f"\n🔍 Monitor run{'  [TEST — dedup bypassed]' if test else ''} — {now}")
 
-    seen     = _load_seen()
+    seen     = set() if test else _load_seen()
     all_hits = []
 
     print("  → HN ...")
@@ -850,13 +907,32 @@ def run_monitor() -> None:
     else:
         print("  → X skipped (no X_BEARER_TOKEN)")
 
-    _save_seen(seen)
+    if not test:
+        _save_seen(seen)
     print(f"  {len(all_hits)} new hit(s) found")
 
-    if not all_hits:
+    # Filter: keyword must appear in title, and title must not contain off-topic terms
+    def _is_relevant(hit: dict) -> bool:
+        title   = hit.get("title", "").lower()
+        snippet = hit.get("snippet", "").lower()
+        keyword = hit.get("keyword", "").lower()
+        if keyword not in title:
+            return False
+        return not any(kw.lower() in title + " " + snippet for kw in EXCLUDE_KEYWORDS)
+
+    relevant = [h for h in all_hits if _is_relevant(h)]
+    skipped  = len(all_hits) - len(relevant)
+    if skipped:
+        print(f"  {skipped} hit(s) filtered (off-topic or keyword not in title)")
+
+    # Cap to avoid overloading the review queue
+    relevant = relevant[:MAX_HITS_PER_RUN]
+    print(f"  Sending {len(relevant)} hit(s) (cap: {MAX_HITS_PER_RUN}/run)")
+
+    if not relevant:
         return
 
-    for hit in all_hits:
+    for hit in relevant:
         draft = draft_reply(hit)
         if not draft:
             continue
@@ -873,29 +949,37 @@ def run_monitor() -> None:
 def main() -> None:
     global _bot, _discord_bot
 
-    missing = [v for v in ("GROK_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID")
-               if not os.getenv(v)]
-    if missing:
-        print(f"❌ Missing required env vars: {', '.join(missing)}")
-        print("   Copy .env.example to .env and fill in the values.")
+    test = "--test" in sys.argv
+
+    if not GROK_API_KEY:
+        print("❌ Missing required env var: GROK_API_KEY")
+        sys.exit(1)
+
+    has_telegram = bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)
+    has_discord  = bool(DISCORD_BOT_TOKEN and DISCORD_CHANNEL_ID)
+    if not has_telegram and not has_discord:
+        print("❌ No notification channel configured — set Telegram or Discord vars in .env")
         sys.exit(1)
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-    _bot = CommunityBot()
-    poll_thread = threading.Thread(target=_bot.poll, daemon=True, name="tg-poll")
-    poll_thread.start()
+    if has_telegram:
+        _bot = CommunityBot()
+        threading.Thread(target=_bot.poll, daemon=True, name="tg-poll").start()
+        print(f"📱 Telegram routing enabled → group {TELEGRAM_CHAT_ID}")
 
-    if DISCORD_BOT_TOKEN and DISCORD_CHANNEL_ID:
+    if has_discord:
         _discord_bot = DiscordBot(DISCORD_BOT_TOKEN, DISCORD_CHANNEL_ID)
-        discord_thread = threading.Thread(target=_discord_bot.poll,
-                                          daemon=True, name="discord-poll")
-        discord_thread.start()
+        threading.Thread(target=_discord_bot.poll, daemon=True, name="discord-poll").start()
         print(f"💬 Discord routing enabled → channel {DISCORD_CHANNEL_ID}")
-    else:
-        print("ℹ️  Discord routing disabled (set DISCORD_BOT_TOKEN + DISCORD_CHANNEL_ID to enable)")
 
-    # Run immediately on startup, then every 3 hours
+    if test:
+        print("🧪 Test mode — running once, dedup bypassed, then exiting.")
+        run_monitor(test=True)
+        time.sleep(3)  # allow Discord/Telegram sends to complete
+        return
+
+    # Normal mode: run immediately then every 3 hours
     run_monitor()
     schedule.every(3).hours.do(run_monitor)
 
