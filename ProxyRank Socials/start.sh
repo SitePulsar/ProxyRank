@@ -31,18 +31,29 @@ start_claude() {
     if screen -list | grep -q "proxyrank-claude"; then
         echo "⚠️  Claude already running. Attach with: screen -r proxyrank-claude"
     else
-        screen -dmS proxyrank-claude claude --channels plugin:telegram@claude-plugins-official
+        screen -dmS proxyrank-claude claude --channels plugin:discord@claude-plugins-official,plugin:telegram@claude-plugins-official
         echo "✅ Claude started   →  screen -r proxyrank-claude"
         echo "   (attach once to complete any first-run prompts)"
     fi
 }
 
+start_watchdog() {
+    if screen -list | grep -q "proxyrank-watchdog"; then
+        echo "⚠️  Watchdog already running. Attach with: screen -r proxyrank-watchdog"
+    else
+        screen -dmS proxyrank-watchdog "$PYTHON" "$DIR/discord_watchdog.py"
+        echo "✅ Watchdog started →  screen -r proxyrank-watchdog"
+    fi
+}
+
 case "${1:-all}" in
-    monitor) start_monitor ;;
-    claude)  start_claude  ;;
+    monitor)  start_monitor  ;;
+    claude)   start_claude   ;;
+    watchdog) start_watchdog ;;
     all)
         start_monitor
         start_claude
+        start_watchdog
         echo ""
         echo "─────────────────────────────────────"
         screen -list | grep proxyrank || true
@@ -52,7 +63,7 @@ case "${1:-all}" in
         echo "Stop   → ./stop.sh"
         ;;
     *)
-        echo "Usage: $0 [monitor|claude|all]"
+        echo "Usage: $0 [monitor|claude|watchdog|all]"
         exit 1
         ;;
 esac

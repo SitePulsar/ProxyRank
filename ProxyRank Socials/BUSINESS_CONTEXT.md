@@ -93,27 +93,28 @@ When replying to community posts (HN, Reddit, X):
 
 ---
 
-## ⚠️  FILL THIS IN — Product details, pricing & status
-
-> **Action required:** complete this section before running the monitor.
-> This data is used when ProxyRank is naturally relevant in a reply.
+## Product details, pricing & status
 
 ```
-Status:           [ e.g. Private beta / Public / Waitlist ]
-URL:              [ proxyrank.ai or staging URL ]
-Pricing:          [ e.g. Free tier + Pro at $X/mo ]
+Status:           Public — live at proxyrank.ai
+URL:              https://proxyrank.ai
+
+Pricing:          Free (no paywall at launch)
 
 Key features:
-  - [ Feature 1 — e.g. "MCP server audit: scores name, description, tool schema quality" ]
-  - [ Feature 2 — e.g. "CLI tool audit: checks man page, --help output, PATH discoverability" ]
-  - [ Feature 3 — e.g. "Side-by-side comparison vs top-ranked tools in your category" ]
+  - MCP server audit: scores Semantic (35%), Schema (30%), Reliability (25%), Governance (10%)
+  - CLI tool audit: checks discoverability by AI orchestrators
+  - Selection Probability Lift score: quantifies how likely orchestrators are to pick your tool
+    (exponential curve, calibrated so score 50 = 1× baseline, score 80 = 2.7×, score 95 = 4.5×)
+  - Rewrite suggestions: concrete fixes to improve your score
+  - 36 agentic intent vectors (v1.1) used for semantic alignment scoring
 
-Current traction:  [ e.g. "500 MCP servers audited, 120 developers on waitlist" ]
-Launch date:       [ date or "coming soon" ]
-GitHub / Docs:     [ URL if public ]
+Current traction:  Early — product live, building initial user base
+Launch date:       2026
+GitHub / Docs:     Not yet public
 
 One-liner (≤ 15 words):
-  [ e.g. "Audit your MCP server and fix why AI orchestrators skip it." ]
+  "Audit your MCP server and fix why AI orchestrators skip it."
 ```
 
 ---

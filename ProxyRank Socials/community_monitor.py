@@ -47,6 +47,7 @@ from pathlib import Path
 import pytz
 import requests
 import schedule
+import websocket
 from dotenv import load_dotenv
 
 # ── Config ─────────────────────────────────────────────────────────────────
@@ -57,8 +58,12 @@ GROK_API_KEY       = os.getenv("GROK_API_KEY", "")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN_COMMUNITY_MONITOR", "")
 TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "")
 
-DISCORD_BOT_TOKEN  = os.getenv("DISCORD_BOT_TOKEN", "")
-DISCORD_CHANNEL_ID = os.getenv("DISCORD_CHANNEL_ID", "")
+DISCORD_BOT_TOKEN      = os.getenv("DISCORD_BOT_TOKEN", "")
+DISCORD_CHANNEL_ID     = os.getenv("DISCORD_CHANNEL_ID", "")
+DISCORD_CHANNEL_ID_HN     = os.getenv("DISCORD_CHANNEL_ID_HN", "")
+DISCORD_CHANNEL_ID_REDDIT = os.getenv("DISCORD_CHANNEL_ID_REDDIT", "")
+DISCORD_CHANNEL_ID_X      = os.getenv("DISCORD_CHANNEL_ID_X", "")
+DISCORD_CHANNEL_ID_XPOST  = os.getenv("DISCORD_CHANNEL_ID_XPOST", "")  # X post proposals
 
 # X: Bearer token for read — URL-decode in case it was pasted URL-encoded
 X_BEARER_TOKEN  = urllib.parse.unquote(os.getenv("X_BEARER_TOKEN", ""))
@@ -369,6 +374,28 @@ def draft_reply(hit: dict) -> str:
     return _call_grok(system, user)
 
 
+def draft_x_post(hit: dict, community_reply: str) -> str:
+    """Generate a standalone X (Twitter) post based on a community hit + drafted reply."""
+    system = (
+        "You write punchy X (Twitter) posts for ProxyRank.ai — a tool that monitors and ranks "
+        "MCP server reliability. The posts sound like a real developer sharing an insight, "
+        "not marketing copy.\n\n"
+        "Rules:\n"
+        "- Max 260 characters.\n"
+        "- One concrete insight or take, grounded in the post topic.\n"
+        "- Mention ProxyRank or proxyrank.ai naturally — not forced.\n"
+        "- No hashtag spam (1 max). No emojis unless they add something.\n"
+        "- Hook in the first line. Make it shareable.\n"
+        "- Do NOT start with 'Excited to', 'Thrilled', 'Just launched'."
+    )
+    user = (
+        f"Post topic: {hit['title']}\n"
+        f"Community reply we drafted: {community_reply}\n\n"
+        "Write a standalone X post (not a reply) that distils the key insight for our audience:"
+    )
+    return _call_grok(system, user, max_tokens=120)
+
+
 # ── X OAuth1.0a signing (for posting replies) ──────────────────────────────
 
 def _x_oauth1_header(method: str, url: str) -> str | None:
@@ -416,7 +443,26 @@ def _post_reply_x(tweet_id: str, reply_text: str) -> bool:
         resp.raise_for_status()
         return True
     except Exception as e:
-        print(f"❌ X post error: {e}")
+        print(f"❌ X reply post error: {e}")
+        return False
+
+
+def _post_tweet_x(text: str) -> bool:
+    """Post a standalone tweet via Twitter API v2. Returns True on success."""
+    auth = _x_oauth1_header("POST", X_POST_URL)
+    if not auth:
+        return False
+    try:
+        resp = requests.post(
+            X_POST_URL,
+            headers={"Authorization": auth, "Content-Type": "application/json"},
+            json={"text": text},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        return True
+    except Exception as e:
+        print(f"❌ X tweet post error: {e}")
         return False
 
 
@@ -676,29 +722,114 @@ class CommunityBot:
                 time.sleep(5)
 
 
+# ── Discord Gateway (WebSocket — receives button/modal interactions) ────────
+
+class DiscordGateway:
+    """
+    Minimal Discord Gateway client.
+    Connects via WebSocket, heartbeats, and dispatches INTERACTION_CREATE events
+    to the provided callback so button clicks and modal submits work.
+    """
+    GATEWAY_URL = "wss://gateway.discord.gg/?v=10&encoding=json"
+
+    def __init__(self, token: str, on_interaction) -> None:
+        self._token          = token
+        self._on_interaction = on_interaction
+        self._sequence: int | None = None
+        self._hb_interval: float   = 41.25  # seconds; overridden by HELLO
+        self._ws: websocket.WebSocketApp | None = None
+
+    def start(self) -> None:
+        """Connect and run forever (call in a daemon thread)."""
+        while True:
+            try:
+                self._ws = websocket.WebSocketApp(
+                    self.GATEWAY_URL,
+                    on_open    = self._on_open,
+                    on_message = self._on_message,
+                    on_error   = lambda ws, e: print(f"⚠️  Gateway error: {e}"),
+                    on_close   = lambda ws, c, m: print("🔌 Gateway closed — reconnecting…"),
+                )
+                self._ws.run_forever(ping_interval=0)
+            except Exception as e:
+                print(f"⚠️  Gateway exception: {e}")
+            time.sleep(5)  # brief pause before reconnect
+
+    def _on_open(self, ws) -> None:
+        print("🔗 Gateway connected")
+
+    def _on_message(self, ws, raw: str) -> None:
+        try:
+            msg = json.loads(raw)
+        except Exception:
+            return
+
+        op = msg.get("op")
+        t  = msg.get("t")
+        d  = msg.get("d") or {}
+        s  = msg.get("s")
+
+        if s is not None:
+            self._sequence = s
+
+        if op == 10:  # HELLO — start heartbeating + identify
+            self._hb_interval = d.get("heartbeat_interval", 41250) / 1000
+            threading.Thread(target=self._heartbeat, args=(ws,), daemon=True).start()
+            ws.send(json.dumps({
+                "op": 2,
+                "d": {
+                    "token":      self._token,
+                    "intents":    0,
+                    "properties": {"os": "linux", "browser": "monitor", "device": "monitor"},
+                },
+            }))
+
+        elif op == 1:  # Server requests heartbeat immediately
+            ws.send(json.dumps({"op": 1, "d": self._sequence}))
+
+        elif op == 0 and t == "READY":
+            print("✅ Gateway ready")
+
+        elif op == 0 and t == "INTERACTION_CREATE":
+            try:
+                self._on_interaction(d)
+            except Exception as e:
+                print(f"⚠️  Interaction handler error: {e}")
+
+    def _heartbeat(self, ws) -> None:
+        while True:
+            time.sleep(self._hb_interval)
+            try:
+                ws.send(json.dumps({"op": 1, "d": self._sequence}))
+            except Exception:
+                break
+
+
 # ── Discord bot ────────────────────────────────────────────────────────────
 
 class DiscordBot:
     """
-    Posts hits to a Discord channel and polls for reply-based commands.
-
-    User replies to a hit message with:
-      send              — post the draft as-is
-      skip              — discard this hit
-      tweak: <instr>    — regenerate the draft with the given instruction
+    Posts hits to Discord channels with interactive buttons.
+    Buttons: Send · Tweak (modal) · Create X Post · Reject
+    X Post channel gets its own Approve / Reject buttons.
+    Interactions are received via the Gateway WebSocket.
     """
 
     DISCORD_API = "https://discord.com/api/v10"
 
-    def __init__(self, token: str, channel_id: str) -> None:
-        self._token      = token
-        self._channel_id = channel_id
-        self._headers    = {
+    def __init__(self, token: str, channel_id: str,
+                 channel_map: dict | None = None,
+                 xpost_channel_id: str = "") -> None:
+        self._token            = token
+        self._channel_id       = channel_id          # default/fallback channel
+        self._channel_map      = channel_map or {}   # source → channel_id
+        self._xpost_channel_id = xpost_channel_id    # X post proposals channel
+        self._headers          = {
             "Authorization": f"Bot {token}",
             "Content-Type":  "application/json",
         }
-        self._last_msg_id: str = "0"
-        self._pending: dict    = {}  # parent_message_id → hit+draft session
+        self._pending: dict      = {}  # draft_msg_id → hit+draft session
+        self._xpost_pending: dict = {}  # xpost_msg_id → {draft, hit}
         self._load()
 
     def _save(self) -> None:
@@ -729,18 +860,21 @@ class DiscordBot:
             print(f"⚠️  Discord API error ({method} {path}): {e}")
             return {}
 
-    def _send(self, content: str, reply_to: str | None = None) -> str:
+    def _send(self, content: str, reply_to: str | None = None,
+              channel_id: str | None = None) -> str:
         """Post a message; returns the new message ID or empty string."""
+        ch = channel_id or self._channel_id
         payload: dict = {"content": content}
         if reply_to:
             payload["message_reference"] = {"message_id": reply_to}
-        result = self._api("POST", f"/channels/{self._channel_id}/messages",
-                           json=payload)
+        result = self._api("POST", f"/channels/{ch}/messages", json=payload)
         return result.get("id", "") if isinstance(result, dict) else ""
 
     # ── Send a new hit ────────────────────────────────────────────────────
 
     def send_hit(self, hit: dict, draft: str) -> None:
+        # Route to per-source channel if configured, else fall back to default
+        channel_id   = self._channel_map.get(hit["source"], self._channel_id)
         source_icon  = {"hn": "🔶", "reddit": "🟠", "x": "🐦"}.get(hit["source"], "📡")
         source_label = {
             "hn":     "Hacker News",
@@ -760,39 +894,277 @@ class DiscordBot:
         card = (
             f"{source_icon} **{source_label}**  ·  `{hit['keyword']}`\n"
             f"**{hit['title']}**\n"
-            f"{links}\n\n"
-            f"*Reply to the text below: `send` · `skip` · `tweak: instruction`*"
+            f"{links}"
         )
-        card_id = self._send(card)
-        # Send draft as a plain follow-up — easy to long-press and copy on mobile
-        msg_id = self._send(draft, reply_to=card_id) if card_id else self._send(draft)
-        if msg_id:
-            self._pending[msg_id] = {**hit, "draft": draft}
-            self._save()
-            print(f"💬 Discord: sent [{hit['source']}] {hit['title'][:65]}")
+        card_id = self._send(card, channel_id=channel_id)
+        if not card_id:
+            return
+
+        # Build buttons — placeholder msg_id filled in after we know it
+        # We send the draft first without buttons, get its ID, then edit to add buttons
+        msg_id = self._send(draft, reply_to=card_id, channel_id=channel_id)
+        if not msg_id:
+            return
+
+        # Edit the draft message to attach action buttons
+        xpost_btn = []
+        if self._xpost_channel_id:
+            xpost_btn = [{"type": 2, "style": 2, "label": "📢 Create X Post",
+                          "custom_id": f"xpost:{msg_id}"}]
+        buttons = {
+            "components": [{
+                "type": 1,
+                "components": [
+                    {"type": 2, "style": 3, "label": "✅ Send",   "custom_id": f"send:{msg_id}"},
+                    {"type": 2, "style": 2, "label": "✏️ Tweak",  "custom_id": f"tweak:{msg_id}"},
+                    *xpost_btn,
+                    {"type": 2, "style": 4, "label": "❌ Reject", "custom_id": f"reject:{msg_id}"},
+                ],
+            }]
+        }
+        self._api("PATCH", f"/channels/{channel_id}/messages/{msg_id}", json=buttons)
+
+        self._pending[msg_id] = {**hit, "draft": draft}
+        self._save()
+        print(f"💬 Discord: sent [{hit['source']}] → #{channel_id} — {hit['title'][:55]}")
 
     # ── Poll for replies ──────────────────────────────────────────────────
 
     def poll(self) -> None:
-        """Long-poll the Discord channel for new messages. Runs in a daemon thread."""
-        print("📡 Discord poll started")
-        # Seed last_msg_id so we don't replay old messages on startup
-        msgs = self._api("GET", f"/channels/{self._channel_id}/messages",
-                         params={"limit": 1})
-        if isinstance(msgs, list) and msgs:
-            self._last_msg_id = msgs[0]["id"]
+        """Long-poll all configured Discord channels for new messages."""
+        all_channels = list({self._channel_id} | set(self._channel_map.values()) - {""})
+        print(f"📡 Discord poll started — watching {len(all_channels)} channel(s)")
+
+        # Seed per-channel cursor so we don't replay old messages on startup
+        last_ids: dict[str, str] = {}
+        for ch in all_channels:
+            msgs = self._api("GET", f"/channels/{ch}/messages", params={"limit": 1})
+            last_ids[ch] = msgs[0]["id"] if isinstance(msgs, list) and msgs else "0"
 
         while True:
             try:
-                msgs = self._api("GET", f"/channels/{self._channel_id}/messages",
-                                 params={"after": self._last_msg_id, "limit": 100})
-                if isinstance(msgs, list):
-                    for msg in reversed(msgs):   # oldest first
-                        self._last_msg_id = msg["id"]
-                        self._handle_message(msg)
+                for ch in all_channels:
+                    msgs = self._api("GET", f"/channels/{ch}/messages",
+                                     params={"after": last_ids[ch], "limit": 100})
+                    if isinstance(msgs, list):
+                        for msg in reversed(msgs):   # oldest first
+                            last_ids[ch] = msg["id"]
+                            self._handle_message(msg)
             except Exception as e:
                 print(f"⚠️  Discord poll error: {e}")
             time.sleep(3)
+
+    # ── Interaction (button / modal) handler ─────────────────────────────
+
+    def handle_interaction(self, data: dict) -> None:
+        """Called by DiscordGateway for every INTERACTION_CREATE event."""
+        itype     = data.get("type")         # 3 = component, 5 = modal submit
+        iid       = data.get("id", "")
+        token     = data.get("token", "")
+        cdata     = data.get("data", {})
+        custom_id = cdata.get("custom_id", "")
+
+        if itype == 3:  # Message component (button)
+            action, _, session_key = custom_id.partition(":")
+            if action == "send":
+                self._ack_interaction(iid, token)
+                session = self._pending.get(session_key)
+                if session:
+                    threading.Thread(
+                        target=self._do_post_interaction,
+                        args=(session_key, session),
+                        daemon=True,
+                    ).start()
+
+            elif action == "reject":
+                self._ack_interaction(iid, token, content="❌ Rejected.")
+                self._pending.pop(session_key, None)
+                self._save()
+
+            elif action == "tweak":
+                # Open a modal with a text input for the instruction
+                self._respond_interaction(iid, token, {
+                    "type": 9,  # MODAL
+                    "data": {
+                        "title":      "Tweak instruction",
+                        "custom_id":  f"tweak_modal:{session_key}",
+                        "components": [{
+                            "type": 1,
+                            "components": [{
+                                "type":        4,
+                                "custom_id":   "instruction",
+                                "label":       "Instruction",
+                                "style":       2,
+                                "placeholder": "e.g. make it sharper, add ProxyRank mention",
+                                "required":    True,
+                            }],
+                        }],
+                    },
+                })
+
+            elif action == "xpost":
+                self._ack_interaction(iid, token, content="📢 Generating X post…")
+                session = self._pending.get(session_key)
+                if session:
+                    threading.Thread(
+                        target=self._create_xpost,
+                        args=(session,),
+                        daemon=True,
+                    ).start()
+
+            elif action == "xpost_approve":
+                self._ack_interaction(iid, token)
+                xp = self._xpost_pending.get(session_key)
+                if xp:
+                    threading.Thread(
+                        target=self._post_x_tweet,
+                        args=(session_key, xp),
+                        daemon=True,
+                    ).start()
+
+            elif action == "xpost_reject":
+                self._ack_interaction(iid, token, content="❌ X post rejected.")
+                self._xpost_pending.pop(session_key, None)
+
+        elif itype == 5:  # Modal submit
+            action, _, session_key = custom_id.partition(":")
+            if action == "tweak_modal":
+                instruction = ""
+                for row in cdata.get("components", []):
+                    for comp in row.get("components", []):
+                        if comp.get("custom_id") == "instruction":
+                            instruction = comp.get("value", "").strip()
+                if instruction:
+                    self._ack_interaction(iid, token, content="✍️ Rewriting…")
+                    session = self._pending.get(session_key)
+                    if session:
+                        threading.Thread(
+                            target=self._do_tweak,
+                            args=(session_key, session, instruction),
+                            daemon=True,
+                        ).start()
+
+    def _ack_interaction(self, iid: str, token: str, content: str | None = None) -> None:
+        """Acknowledge an interaction (required within 3 s)."""
+        if content:
+            body = {"type": 4, "data": {"content": content, "flags": 64}}  # ephemeral
+        else:
+            body = {"type": 6}  # deferred update (no visible change)
+        try:
+            requests.post(
+                f"{self.DISCORD_API}/interactions/{iid}/{token}/callback",
+                json=body, timeout=3,
+            )
+        except Exception as e:
+            print(f"⚠️  Interaction ack failed: {e}")
+
+    def _respond_interaction(self, iid: str, token: str, body: dict) -> None:
+        try:
+            requests.post(
+                f"{self.DISCORD_API}/interactions/{iid}/{token}/callback",
+                json=body, timeout=3,
+            )
+        except Exception as e:
+            print(f"⚠️  Interaction respond failed: {e}")
+
+    def _do_post_interaction(self, session_key: str, session: dict) -> None:
+        source = session["source"]
+        draft  = session["draft"]
+        url    = session["url"]
+        ch     = self._channel_map.get(source, self._channel_id)
+
+        if source == "x":
+            tweet_id = session.get("tweet_id", "")
+            if all([X_API_KEY, X_API_SECRET, X_ACCESS_TOKEN, X_ACCESS_SECRET]):
+                ok = _post_reply_x(tweet_id, draft)
+                msg = f"✅ Reply posted to X!\n{url}" if ok else \
+                      f"❌ X post failed — copy manually:\n```\n{draft}\n```\n{url}"
+            else:
+                msg = f"📋 **Post on X:**\n```\n{draft}\n```\n{url}"
+        elif source == "reddit":
+            msg = f"📋 **Post on Reddit:**\n```\n{draft}\n```\n{url}"
+        else:
+            hn_url = f"https://news.ycombinator.com/item?id={session.get('hn_id', '')}"
+            msg = f"📋 **Post on HN:**\n```\n{draft}\n```\n{hn_url}"
+
+        self._send(msg, channel_id=ch)
+        self._pending.pop(session_key, None)
+        self._save()
+
+    def _do_tweak(self, session_key: str, session: dict, instruction: str) -> None:
+        system = (
+            "You are a developer replying to posts on HN, Reddit, and Twitter/X. "
+            "Rewrite the draft reply according to the user's instruction. "
+            "Keep it 2–3 sentences, developer-to-developer, no emojis, no self-promotion."
+        )
+        user_prompt = (
+            f"Original draft:\n{session['draft']}\n\n"
+            f"Instruction: {instruction}\n\nRewritten reply:"
+        )
+        new_draft = _call_grok(system, user_prompt)
+        if not new_draft:
+            return
+        session["draft"] = new_draft
+        self._save()
+
+        source = session["source"]
+        ch     = self._channel_map.get(source, self._channel_id)
+        source_icon = {"hn": "🔶", "reddit": "🟠", "x": "🐦"}.get(source, "📡")
+        note_id = self._send(f"{source_icon} **Revised draft:**", channel_id=ch)
+        new_msg_id = self._send(new_draft, reply_to=note_id, channel_id=ch) if note_id \
+                     else self._send(new_draft, channel_id=ch)
+        if new_msg_id:
+            xpost_btn = []
+            if self._xpost_channel_id:
+                xpost_btn = [{"type": 2, "style": 2, "label": "📢 Create X Post",
+                              "custom_id": f"xpost:{new_msg_id}"}]
+            self._api("PATCH", f"/channels/{ch}/messages/{new_msg_id}", json={
+                "components": [{
+                    "type": 1,
+                    "components": [
+                        {"type": 2, "style": 3, "label": "✅ Send",   "custom_id": f"send:{new_msg_id}"},
+                        {"type": 2, "style": 2, "label": "✏️ Tweak",  "custom_id": f"tweak:{new_msg_id}"},
+                        *xpost_btn,
+                        {"type": 2, "style": 4, "label": "❌ Reject", "custom_id": f"reject:{new_msg_id}"},
+                    ],
+                }]
+            })
+            self._pending[new_msg_id] = session
+            self._save()
+
+    def _create_xpost(self, session: dict) -> None:
+        if not self._xpost_channel_id:
+            return
+        x_draft = draft_x_post(session, session["draft"])
+        if not x_draft:
+            return
+        msg_id = self._send(x_draft, channel_id=self._xpost_channel_id)
+        if not msg_id:
+            return
+        self._api("PATCH", f"/channels/{self._xpost_channel_id}/messages/{msg_id}", json={
+            "components": [{
+                "type": 1,
+                "components": [
+                    {"type": 2, "style": 3, "label": "✅ Approve & Post",
+                     "custom_id": f"xpost_approve:{msg_id}"},
+                    {"type": 2, "style": 4, "label": "❌ Reject",
+                     "custom_id": f"xpost_reject:{msg_id}"},
+                ],
+            }]
+        })
+        self._xpost_pending[msg_id] = {"draft": x_draft, "hit": session}
+        print(f"📢 X post proposal sent → #{self._xpost_channel_id}")
+
+    def _post_x_tweet(self, session_key: str, xp: dict) -> None:
+        draft = xp["draft"]
+        if all([X_API_KEY, X_API_SECRET, X_ACCESS_TOKEN, X_ACCESS_SECRET]):
+            ok = _post_tweet_x(draft)
+            msg = f"✅ Posted to X!\n\n{draft}" if ok else \
+                  f"❌ Post failed — copy manually:\n```\n{draft}\n```"
+        else:
+            msg = f"📋 **Post this on X:**\n```\n{draft}\n```"
+        self._send(msg, channel_id=self._xpost_channel_id)
+        self._xpost_pending.pop(session_key, None)
 
     def _handle_message(self, msg: dict) -> None:
         ref       = msg.get("message_reference", {})
@@ -800,6 +1172,7 @@ class DiscordBot:
         if not parent_id or parent_id not in self._pending:
             return
 
+        ch      = msg.get("channel_id", self._channel_id)
         text    = msg.get("content", "").strip()
         cmd     = text.lower().split(":")[0].strip()
         session = self._pending[parent_id]
@@ -807,17 +1180,18 @@ class DiscordBot:
         if cmd == "skip":
             self._pending.pop(parent_id, None)
             self._save()
-            self._send("⏭️ Skipped.", reply_to=msg["id"])
+            self._send("⏭️ Skipped.", reply_to=msg["id"], channel_id=ch)
 
         elif cmd == "send":
-            self._do_post(parent_id, session, msg["id"])
+            self._do_post(parent_id, session, msg["id"], ch)
 
         elif cmd == "tweak":
             instruction = text[text.index(":") + 1:].strip() if ":" in text else ""
             if not instruction:
-                self._send("Usage: `tweak: your instruction here`", reply_to=msg["id"])
+                self._send("Usage: `tweak: your instruction here`",
+                           reply_to=msg["id"], channel_id=ch)
                 return
-            self._send("✍️ Rewriting…", reply_to=msg["id"])
+            self._send("✍️ Rewriting…", reply_to=msg["id"], channel_id=ch)
             system = (
                 "You are a developer replying to posts on HN, Reddit, and Twitter/X. "
                 "Rewrite the draft reply according to the user's instruction. "
@@ -830,21 +1204,25 @@ class DiscordBot:
             )
             new_draft = _call_grok(system, user_prompt)
             if not new_draft:
-                self._send("❌ Couldn't rewrite. Try again.", reply_to=msg["id"])
+                self._send("❌ Couldn't rewrite. Try again.",
+                           reply_to=msg["id"], channel_id=ch)
                 return
             session["draft"] = new_draft
             self._save()
             source_icon = {"hn": "🔶", "reddit": "🟠", "x": "🐦"}.get(session["source"], "📡")
             note_id = self._send(
                 f"{source_icon} **Revised reply** — long-press the text below to copy:",
-                reply_to=msg["id"],
+                reply_to=msg["id"], channel_id=ch,
             )
-            new_msg_id = self._send(new_draft, reply_to=note_id) if note_id else self._send(new_draft)
+            new_msg_id = (self._send(new_draft, reply_to=note_id, channel_id=ch)
+                          if note_id else self._send(new_draft, channel_id=ch))
             if new_msg_id:
                 self._pending[new_msg_id] = session
                 self._save()
 
-    def _do_post(self, parent_id: str, session: dict, reply_to_id: str) -> None:
+    def _do_post(self, parent_id: str, session: dict,
+                 reply_to_id: str, channel_id: str | None = None) -> None:
+        ch     = channel_id or self._channel_id
         source = session["source"]
         draft  = session["draft"]
         url    = session["url"]
@@ -854,27 +1232,28 @@ class DiscordBot:
             if all([X_API_KEY, X_API_SECRET, X_ACCESS_TOKEN, X_ACCESS_SECRET]):
                 ok = _post_reply_x(tweet_id, draft)
                 if ok:
-                    self._send(f"✅ Reply posted to X!\n{url}", reply_to=reply_to_id)
+                    self._send(f"✅ Reply posted to X!\n{url}",
+                               reply_to=reply_to_id, channel_id=ch)
                 else:
                     self._send(
                         f"❌ X post failed — copy manually:\n```\n{draft}\n```\n{url}",
-                        reply_to=reply_to_id,
+                        reply_to=reply_to_id, channel_id=ch,
                     )
             else:
                 self._send(
                     f"📋 **Post on X:**\n```\n{draft}\n```\n{url}",
-                    reply_to=reply_to_id,
+                    reply_to=reply_to_id, channel_id=ch,
                 )
         elif source == "reddit":
             self._send(
                 f"📋 **Post on Reddit:**\n```\n{draft}\n```\n{url}",
-                reply_to=reply_to_id,
+                reply_to=reply_to_id, channel_id=ch,
             )
         elif source == "hn":
             hn_comment_url = f"https://news.ycombinator.com/item?id={session.get('hn_id', '')}"
             self._send(
                 f"📋 **Post on HN:**\n```\n{draft}\n```\n{hn_comment_url}",
-                reply_to=reply_to_id,
+                reply_to=reply_to_id, channel_id=ch,
             )
 
         self._pending.pop(parent_id, None)
@@ -925,6 +1304,18 @@ def run_monitor(test: bool = False) -> None:
     if skipped:
         print(f"  {skipped} hit(s) filtered (off-topic or keyword not in title)")
 
+    # Deduplicate by title within the run (same story on HN + Reddit looks like a duplicate)
+    seen_titles: set[str] = set()
+    deduped: list = []
+    for hit in relevant:
+        norm = hit["title"].lower()[:80]
+        if norm not in seen_titles:
+            seen_titles.add(norm)
+            deduped.append(hit)
+    if len(deduped) < len(relevant):
+        print(f"  {len(relevant) - len(deduped)} duplicate title(s) dropped")
+    relevant = deduped
+
     # Cap to avoid overloading the review queue
     relevant = relevant[:MAX_HITS_PER_RUN]
     print(f"  Sending {len(relevant)} hit(s) (cap: {MAX_HITS_PER_RUN}/run)")
@@ -956,7 +1347,15 @@ def main() -> None:
         sys.exit(1)
 
     has_telegram = bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)
-    has_discord  = bool(DISCORD_BOT_TOKEN and DISCORD_CHANNEL_ID)
+    discord_channel_map: dict[str, str] = {}
+    if DISCORD_CHANNEL_ID_HN:
+        discord_channel_map["hn"] = DISCORD_CHANNEL_ID_HN
+    if DISCORD_CHANNEL_ID_REDDIT:
+        discord_channel_map["reddit"] = DISCORD_CHANNEL_ID_REDDIT
+    if DISCORD_CHANNEL_ID_X:
+        discord_channel_map["x"] = DISCORD_CHANNEL_ID_X
+
+    has_discord = bool(DISCORD_BOT_TOKEN and (DISCORD_CHANNEL_ID or discord_channel_map))
     if not has_telegram and not has_discord:
         print("❌ No notification channel configured — set Telegram or Discord vars in .env")
         sys.exit(1)
@@ -969,9 +1368,20 @@ def main() -> None:
         print(f"📱 Telegram routing enabled → group {TELEGRAM_CHAT_ID}")
 
     if has_discord:
-        _discord_bot = DiscordBot(DISCORD_BOT_TOKEN, DISCORD_CHANNEL_ID)
+        _discord_bot = DiscordBot(
+            DISCORD_BOT_TOKEN, DISCORD_CHANNEL_ID,
+            channel_map=discord_channel_map,
+            xpost_channel_id=DISCORD_CHANNEL_ID_XPOST,
+        )
         threading.Thread(target=_discord_bot.poll, daemon=True, name="discord-poll").start()
-        print(f"💬 Discord routing enabled → channel {DISCORD_CHANNEL_ID}")
+        routed = ", ".join(f"{s}→#{cid}" for s, cid in discord_channel_map.items()) or f"all→#{DISCORD_CHANNEL_ID}"
+        print(f"💬 Discord routing enabled — {routed}")
+        if DISCORD_CHANNEL_ID_XPOST:
+            print(f"📢 X post proposals → #{DISCORD_CHANNEL_ID_XPOST}")
+
+        # Start Gateway for button/modal interactions
+        gateway = DiscordGateway(DISCORD_BOT_TOKEN, _discord_bot.handle_interaction)
+        threading.Thread(target=gateway.start, daemon=True, name="discord-gateway").start()
 
     if test:
         print("🧪 Test mode — running once, dedup bypassed, then exiting.")

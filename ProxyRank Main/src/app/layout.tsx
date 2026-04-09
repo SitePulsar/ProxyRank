@@ -30,12 +30,21 @@ export const metadata: Metadata = {
     siteName: "ProxyRank",
     type: "website",
     locale: "en_US",
+    images: [
+      {
+        url: "/opengraph-image",
+        width: 1200,
+        height: 630,
+        alt: "ProxyRank — Agent Discoverability Audit",
+      },
+    ],
   },
   twitter: {
     card: "summary_large_image",
     title: "ProxyRank | Agent Discoverability Audit",
     description:
       "Make your agent the first one picked by AI orchestrators. Free MCP scan.",
+    images: ["/opengraph-image"],
   },
   robots: { index: true, follow: true },
   keywords: [
