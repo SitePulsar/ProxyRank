@@ -1,5 +1,15 @@
 # ProxyRank Socials — Local Context
 
+---
+
+## ⚠️ Subscription-first, API second (cost rule — read first)
+
+**Default: Claude Code subscription. Fallback: metered Anthropic API.** Before adding any new `anthropic` SDK / `@anthropic-ai/sdk` call to this workspace, ask: *"could this be a Claude Code routine (`schedule` skill, `RemoteTrigger`, `/loop`, or a `claude-prs` session) instead?"* Subscription is flat-rate (zero marginal cost); API is metered.
+
+Today this repo uses Grok (xAI, not Anthropic) for reply drafting — Grok spend is unaffected — but the rule applies if any Anthropic-backed feature lands here. Full rule: `~/.claude/CLAUDE.md` (top of file).
+
+---
+
 ## Workspace Identity
 - Directory: `ProxyRank/ProxyRank Socials/`
 - Claude alias: `claude-prs` | Tab: PRS | Telegram: @ClaudeProxyRankSocials_bot | Discord: ProxyRank Socials bot
