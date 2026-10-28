@@ -4,19 +4,17 @@ community_monitor.py — ProxyRank.ai community signal monitor
 
 Polls HN (Algolia), Reddit (JSON API), and X (Twitter API v2) for keywords
 relevant to ProxyRank.ai. Drafts developer-friendly replies using Grok, then
-routes them through Telegram and/or Discord for human review before posting.
+routes them through Discord for human review before posting.
 
 Schedule : every 3 hours
-Platforms: Telegram (active), Discord (active)
+Platforms: Discord
 
 Required .env:
     GROK_API_KEY
-    TELEGRAM_BOT_TOKEN
-    TELEGRAM_CHAT_ID
+    DISCORD_BOT_TOKEN   — Discord routing
+    DISCORD_CHANNEL_ID  — channel to send hits to (or DISCORD_CHANNEL_ID_HN/_REDDIT/_X)
 
 Optional .env:
-    DISCORD_BOT_TOKEN   — enables Discord routing
-    DISCORD_CHANNEL_ID  — channel to send hits to
     X_BEARER_TOKEN      — enables X search (read-only)
     X_API_KEY           — OAuth1.0a for posting replies to X
     X_API_SECRET
@@ -26,7 +24,7 @@ Optional .env:
 
 State files (in DATA_DIR):
     community_state.json          — seen post IDs (dedup)
-    community_sessions_state.json — pending Telegram approvals (survives restarts)
+    discord_sessions_state.json   — pending Discord approvals (survives restarts)
 """
 
 from __future__ import annotations
@@ -55,8 +53,6 @@ from dotenv import load_dotenv
 load_dotenv()
 
 GROK_API_KEY       = os.getenv("GROK_API_KEY", "")
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN_COMMUNITY_MONITOR", "")
-TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "")
 
 DISCORD_BOT_TOKEN      = os.getenv("DISCORD_BOT_TOKEN", "")
 DISCORD_CHANNEL_ID     = os.getenv("DISCORD_CHANNEL_ID", "")
@@ -114,8 +110,6 @@ SUBREDDITS = [
 GROK_BASE_URL = "https://api.x.ai/v1/chat/completions"
 GROK_MODEL    = "grok-3"
 
-TELEGRAM_BASE = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
-
 HN_SEARCH_URL = "https://hn.algolia.com/api/v1/search"
 X_SEARCH_URL  = "https://api.twitter.com/2/tweets/search/recent"
 X_POST_URL    = "https://api.twitter.com/2/tweets"
@@ -123,7 +117,6 @@ X_POST_URL    = "https://api.twitter.com/2/tweets"
 # ── State file paths ───────────────────────────────────────────────────────
 
 COMMUNITY_STATE_PATH        = DATA_DIR / "community_state.json"
-SESSION_STATE_PATH          = DATA_DIR / "community_sessions_state.json"
 DISCORD_SESSION_STATE_PATH  = DATA_DIR / "discord_sessions_state.json"
 
 # ── Atomic write ───────────────────────────────────────────────────────────
@@ -149,21 +142,6 @@ def _load_seen() -> set:
 
 def _save_seen(seen: set) -> None:
     _atomic_write_json(COMMUNITY_STATE_PATH, {"seen": sorted(seen)})
-
-
-# ── Session state (pending Telegram approvals) ─────────────────────────────
-
-def _load_sessions() -> dict:
-    if SESSION_STATE_PATH.exists():
-        try:
-            return json.loads(SESSION_STATE_PATH.read_text(encoding="utf-8"))
-        except Exception:
-            pass
-    return {}
-
-
-def _save_sessions(sessions: dict) -> None:
-    _atomic_write_json(SESSION_STATE_PATH, sessions)
 
 
 # ── Source: Hacker News (Algolia) ──────────────────────────────────────────
@@ -464,262 +442,6 @@ def _post_tweet_x(text: str) -> bool:
     except Exception as e:
         print(f"❌ X tweet post error: {e}")
         return False
-
-
-# ── Telegram bot ───────────────────────────────────────────────────────────
-
-class CommunityBot:
-    """
-    Long-polls Telegram for button presses and free-text adjustments.
-    Sends new hits with [✅ Stuur] [✍️ Aanpassen] [❌ Overslaan] inline buttons.
-    Session state survives restarts via community_sessions_state.json.
-    """
-
-    def __init__(self) -> None:
-        self._last_update_id: int  = 0
-        self._pending: dict        = {}   # session_id → hit + draft + msg_id
-        self._awaiting_tweak: dict = {}   # chat_id (str) → session_id
-        self._load()
-
-    # ── Persistence ──────────────────────────────────────────────────────
-
-    def _save(self) -> None:
-        _save_sessions(self._pending)
-
-    def _load(self) -> None:
-        data = _load_sessions()
-        if data:
-            self._pending = data
-            print(f"♻️  Restored {len(data)} pending session(s) from disk.")
-
-    # ── Telegram helpers ──────────────────────────────────────────────────
-
-    def _tg(self, method: str, **kwargs) -> dict:
-        try:
-            # getUpdates uses long-polling (timeout=30 inside kwargs) — give extra buffer
-            http_timeout = kwargs.get("timeout", 10) + 5 if method == "getUpdates" else 10
-            r = requests.post(f"{TELEGRAM_BASE}/{method}", json=kwargs, timeout=http_timeout)
-            result = r.json()
-            if not result.get("ok"):
-                print(f"⚠️  Telegram {method}: {result.get('description', result)}")
-            return result
-        except Exception as e:
-            print(f"⚠️  Telegram error ({method}): {e}")
-            return {}
-
-    def _keyboard(self, session_id: str) -> dict:
-        return {"inline_keyboard": [[
-            {"text": "✅ Stuur",      "callback_data": f"cm_send_{session_id}"},
-            {"text": "✍️ Aanpassen",  "callback_data": f"cm_tweak_{session_id}"},
-            {"text": "❌ Overslaan",  "callback_data": f"cm_skip_{session_id}"},
-        ]]}
-
-    # ── Send a new hit ────────────────────────────────────────────────────
-
-    def send_hit(self, hit: dict, draft: str) -> None:
-        session_id   = uuid.uuid4().hex[:8]
-        source_icon  = {"hn": "🔶", "reddit": "🟠", "x": "🐦"}.get(hit["source"], "📡")
-        source_label = {
-            "hn":     "Hacker News",
-            "reddit": f"r/{hit.get('subreddit', 'reddit')}",
-            "x":      "Twitter/X",
-        }.get(hit["source"], hit["source"])
-
-        text = (
-            f"{source_icon} <b>{source_label}</b>  ·  <code>{hit['keyword']}</code>\n\n"
-            f"<b>{hit['title']}</b>\n"
-            f"<a href='{hit['url']}'>Bekijk post →</a>\n\n"
-            f"💬 <b>Voorgesteld antwoord:</b>\n"
-            f"<i>{draft}</i>"
-        )
-        result = self._tg(
-            "sendMessage",
-            chat_id=TELEGRAM_CHAT_ID,
-            text=text,
-            parse_mode="HTML",
-            reply_markup=self._keyboard(session_id),
-            disable_web_page_preview=True,
-        )
-        msg_id = result.get("result", {}).get("message_id")
-        self._pending[session_id] = {**hit, "draft": draft, "msg_id": msg_id}
-        self._save()
-        print(f"📱 Sent [{hit['source']}] {hit['title'][:65]}")
-
-    # ── Callback handler (button presses) ────────────────────────────────
-
-    def _handle_callback(self, cq: dict) -> None:
-        data   = cq.get("data", "")
-        msg_id = cq["message"]["message_id"]
-        chat_id = str(cq["message"]["chat"]["id"])
-
-        self._tg("answerCallbackQuery", callback_query_id=cq["id"])
-
-        if not data.startswith("cm_"):
-            return
-
-        parts = data.split("_", 2)   # ["cm", action, session_id]
-        if len(parts) < 3:
-            return
-        action, session_id = parts[1], parts[2]
-
-        if action == "skip":
-            self._tg("editMessageReplyMarkup",
-                     chat_id=TELEGRAM_CHAT_ID, message_id=msg_id,
-                     reply_markup={"inline_keyboard": []})
-            self._pending.pop(session_id, None)
-            self._save()
-            return
-
-        session = self._pending.get(session_id)
-        if not session:
-            self._tg("editMessageReplyMarkup",
-                     chat_id=TELEGRAM_CHAT_ID, message_id=msg_id,
-                     reply_markup={"inline_keyboard": []})
-            self._tg("sendMessage", chat_id=TELEGRAM_CHAT_ID,
-                     text="⏱ Sessie verlopen.", parse_mode="HTML")
-            return
-
-        if action == "tweak":
-            self._awaiting_tweak[chat_id] = session_id
-            self._tg("sendMessage",
-                     chat_id=TELEGRAM_CHAT_ID,
-                     text=(
-                         "✍️ Typ je aanpassing-instructie:\n"
-                         "<i>(bijv: \"maak het korter\", \"voeg een vraag toe\", \"meer technisch\")</i>"
-                     ),
-                     parse_mode="HTML")
-            return
-
-        if action == "send":
-            self._tg("editMessageReplyMarkup",
-                     chat_id=TELEGRAM_CHAT_ID, message_id=msg_id,
-                     reply_markup={"inline_keyboard": []})
-            self._do_post(session_id, session)
-
-    # ── Post to platform ──────────────────────────────────────────────────
-
-    def _do_post(self, session_id: str, session: dict) -> None:
-        source = session["source"]
-        draft  = session["draft"]
-        url    = session["url"]
-
-        if source == "x":
-            tweet_id = session.get("tweet_id", "")
-            if all([X_API_KEY, X_API_SECRET, X_ACCESS_TOKEN, X_ACCESS_SECRET]):
-                ok = _post_reply_x(tweet_id, draft)
-                if ok:
-                    self._tg("sendMessage", chat_id=TELEGRAM_CHAT_ID,
-                             text=f"✅ Reply gepost op X!\n<a href='{url}'>Bekijk →</a>",
-                             parse_mode="HTML", disable_web_page_preview=True)
-                else:
-                    self._tg("sendMessage", chat_id=TELEGRAM_CHAT_ID,
-                             text=(
-                                 f"❌ X post mislukt — kopieer handmatig:\n\n"
-                                 f"<code>{draft}</code>\n\n"
-                                 f"<a href='{url}'>Open tweet →</a>"
-                             ),
-                             parse_mode="HTML", disable_web_page_preview=True)
-            else:
-                self._tg("sendMessage", chat_id=TELEGRAM_CHAT_ID,
-                         text=(
-                             f"📋 <b>Kopieer en post op X:</b>\n\n"
-                             f"<code>{draft}</code>\n\n"
-                             f"<a href='{url}'>Open tweet →</a>"
-                         ),
-                         parse_mode="HTML", disable_web_page_preview=True)
-
-        elif source == "reddit":
-            self._tg("sendMessage", chat_id=TELEGRAM_CHAT_ID,
-                     text=(
-                         f"📋 <b>Kopieer en post op Reddit:</b>\n\n"
-                         f"<code>{draft}</code>\n\n"
-                         f"<a href='{url}'>Open post →</a>"
-                     ),
-                     parse_mode="HTML", disable_web_page_preview=True)
-
-        elif source == "hn":
-            hn_comment_url = f"https://news.ycombinator.com/item?id={session.get('hn_id', '')}"
-            self._tg("sendMessage", chat_id=TELEGRAM_CHAT_ID,
-                     text=(
-                         f"📋 <b>Kopieer en post op HN:</b>\n\n"
-                         f"<code>{draft}</code>\n\n"
-                         f"<a href='{hn_comment_url}'>Open comment thread →</a>"
-                     ),
-                     parse_mode="HTML", disable_web_page_preview=True)
-
-        self._pending.pop(session_id, None)
-        self._save()
-
-    # ── Free-text handler (tweak instructions) ────────────────────────────
-
-    def _handle_message(self, msg: dict) -> None:
-        chat_id = str(msg["chat"]["id"])
-        text    = msg.get("text", "").strip()
-
-        if not text or chat_id not in self._awaiting_tweak:
-            return
-
-        session_id = self._awaiting_tweak.pop(chat_id)
-        session    = self._pending.get(session_id)
-        if not session:
-            self._tg("sendMessage", chat_id=chat_id, text="⏱ Sessie verlopen.")
-            return
-
-        system = (
-            "You are a developer replying to posts on HN, Reddit, and Twitter/X. "
-            "Rewrite the draft reply according to the user's instruction. "
-            "Keep it 2–3 sentences, developer-to-developer, no emojis, no self-promotion."
-        )
-        user_prompt = (
-            f"Original draft:\n{session['draft']}\n\n"
-            f"Instruction: {text}\n\n"
-            "Rewritten reply:"
-        )
-        new_draft = _call_grok(system, user_prompt)
-        if not new_draft:
-            self._tg("sendMessage", chat_id=TELEGRAM_CHAT_ID,
-                     text="❌ Grok kon het niet herschrijven. Typ opnieuw je instructie.")
-            self._awaiting_tweak[chat_id] = session_id
-            return
-
-        session["draft"] = new_draft
-        self._save()
-
-        source_icon = {"hn": "🔶", "reddit": "🟠", "x": "🐦"}.get(session["source"], "📡")
-        result = self._tg(
-            "sendMessage",
-            chat_id=TELEGRAM_CHAT_ID,
-            text=f"{source_icon} <b>Herzien antwoord:</b>\n\n<i>{new_draft}</i>",
-            parse_mode="HTML",
-            reply_markup=self._keyboard(session_id),
-        )
-        msg_id = result.get("result", {}).get("message_id")
-        if msg_id:
-            session["msg_id"] = msg_id
-        self._save()
-
-    # ── Long-polling loop (runs in background thread) ─────────────────────
-
-    def poll(self) -> None:
-        """Long-poll Telegram getUpdates. Runs forever in a daemon thread."""
-        print("📡 Telegram long-poll started")
-        while True:
-            try:
-                result = self._tg(
-                    "getUpdates",
-                    offset=self._last_update_id + 1,
-                    timeout=30,
-                    allowed_updates=["callback_query", "message"],
-                )
-                for update in result.get("result", []):
-                    self._last_update_id = update["update_id"]
-                    if "callback_query" in update:
-                        self._handle_callback(update["callback_query"])
-                    elif "message" in update:
-                        self._handle_message(update["message"])
-            except Exception as e:
-                print(f"⚠️  Telegram poll error: {e}")
-                time.sleep(5)
 
 
 # ── Discord Gateway (WebSocket — receives button/modal interactions) ────────
@@ -1262,12 +984,11 @@ class DiscordBot:
 
 # ── Monitor job ────────────────────────────────────────────────────────────
 
-_bot: CommunityBot | None = None
 _discord_bot: DiscordBot | None = None
 
 
 def run_monitor(test: bool = False) -> None:
-    global _bot, _discord_bot
+    global _discord_bot
     now = datetime.now(CET).strftime("%Y-%m-%d %H:%M CET")
     print(f"\n🔍 Monitor run{'  [TEST — dedup bypassed]' if test else ''} — {now}")
 
@@ -1327,9 +1048,6 @@ def run_monitor(test: bool = False) -> None:
         draft = draft_reply(hit)
         if not draft:
             continue
-        if _bot is not None:
-            _bot.send_hit(hit, draft)
-            time.sleep(1.2)  # avoid Telegram flood limits
         if _discord_bot is not None:
             _discord_bot.send_hit(hit, draft)
             time.sleep(0.5)
@@ -1338,7 +1056,7 @@ def run_monitor(test: bool = False) -> None:
 # ── Entry point ────────────────────────────────────────────────────────────
 
 def main() -> None:
-    global _bot, _discord_bot
+    global _discord_bot
 
     test = "--test" in sys.argv
 
@@ -1346,7 +1064,6 @@ def main() -> None:
         print("❌ Missing required env var: GROK_API_KEY")
         sys.exit(1)
 
-    has_telegram = bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)
     discord_channel_map: dict[str, str] = {}
     if DISCORD_CHANNEL_ID_HN:
         discord_channel_map["hn"] = DISCORD_CHANNEL_ID_HN
@@ -1356,16 +1073,11 @@ def main() -> None:
         discord_channel_map["x"] = DISCORD_CHANNEL_ID_X
 
     has_discord = bool(DISCORD_BOT_TOKEN and (DISCORD_CHANNEL_ID or discord_channel_map))
-    if not has_telegram and not has_discord:
-        print("❌ No notification channel configured — set Telegram or Discord vars in .env")
+    if not has_discord:
+        print("❌ No notification channel configured — set DISCORD_BOT_TOKEN + DISCORD_CHANNEL_ID in .env")
         sys.exit(1)
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-
-    if has_telegram:
-        _bot = CommunityBot()
-        threading.Thread(target=_bot.poll, daemon=True, name="tg-poll").start()
-        print(f"📱 Telegram routing enabled → group {TELEGRAM_CHAT_ID}")
 
     if has_discord:
         _discord_bot = DiscordBot(
@@ -1386,7 +1098,7 @@ def main() -> None:
     if test:
         print("🧪 Test mode — running once, dedup bypassed, then exiting.")
         run_monitor(test=True)
-        time.sleep(3)  # allow Discord/Telegram sends to complete
+        time.sleep(3)  # allow Discord sends to complete
         return
 
     # Normal mode: run immediately then every 3 hours
