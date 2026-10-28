@@ -586,7 +586,8 @@ class DiscordBot:
               channel_id: str | None = None) -> str:
         """Post a message; returns the new message ID or empty string."""
         ch = channel_id or self._channel_id
-        payload: dict = {"content": content}
+        # External HN/Reddit/X text lands in content: never let it ping anyone.
+        payload: dict = {"content": content, "allowed_mentions": {"parse": []}}
         if reply_to:
             payload["message_reference"] = {"message_id": reply_to}
         result = self._api("POST", f"/channels/{ch}/messages", json=payload)
@@ -769,7 +770,8 @@ class DiscordBot:
     def _ack_interaction(self, iid: str, token: str, content: str | None = None) -> None:
         """Acknowledge an interaction (required within 3 s)."""
         if content:
-            body = {"type": 4, "data": {"content": content, "flags": 64}}  # ephemeral
+            body = {"type": 4, "data": {"content": content, "flags": 64,  # ephemeral
+                                        "allowed_mentions": {"parse": []}}}
         else:
             body = {"type": 6}  # deferred update (no visible change)
         try:

@@ -62,6 +62,7 @@ Everything lives in a single file: `community_monitor.py`.
 **State persistence:**
 - `community_state.json` — seen post UIDs (dedup across runs)
 - `discord_sessions_state.json` — pending Discord sessions
+- `community_sessions_state.json` — legacy Telegram sessions; no longer read. Pending Telegram approvals are dropped (not migrated): the file is left in place as an archive and can be deleted once reviewed. Hits that were only pending on Telegram will not re-surface (their UIDs are in `community_state.json`).
 
 All writes are atomic (write to `.tmp` then `os.rename`).
 
