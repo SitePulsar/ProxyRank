@@ -1,5 +1,5 @@
 #!/bin/zsh
-# start.sh — launch ProxyRank monitor + Claude Code (with Telegram channel)
+# start.sh — launch ProxyRank monitor + Claude Code (with Discord channel)
 # in persistent screen sessions that survive terminal closes.
 #
 # Usage:
@@ -31,7 +31,7 @@ start_claude() {
     if screen -list | grep -q "proxyrank-claude"; then
         echo "⚠️  Claude already running. Attach with: screen -r proxyrank-claude"
     else
-        screen -dmS proxyrank-claude claude --channels plugin:discord@claude-plugins-official,plugin:telegram@claude-plugins-official
+        screen -dmS proxyrank-claude claude --channels plugin:discord@claude-plugins-official
         echo "✅ Claude started   →  screen -r proxyrank-claude"
         echo "   (attach once to complete any first-run prompts)"
     fi

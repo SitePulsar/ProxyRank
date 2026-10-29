@@ -29,7 +29,7 @@ DISCORD_API = "https://discord.com/api/v10"
 
 SCREEN_NAME   = "proxyrank-claude"
 DIR           = Path(__file__).parent
-CLAUDE_CMD    = f"claude --channels plugin:discord@claude-plugins-official,plugin:telegram@claude-plugins-official"
+CLAUDE_CMD    = f"claude --channels plugin:discord@claude-plugins-official"
 
 POLL_INTERVAL = 8  # seconds
 

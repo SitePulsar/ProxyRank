@@ -12,11 +12,11 @@ Today this repo uses Grok (xAI, not Anthropic) for reply drafting — Grok spend
 
 ## Workspace Identity
 - Directory: `ProxyRank/ProxyRank Socials/`
-- Claude alias: `claude-prs` | Tab: PRS | Telegram: @ClaudeProxyRankSocials_bot | Discord: ProxyRank Socials bot
+- Claude alias: `claude-prs` | Tab: PRS | Discord: ProxyRank Socials bot
 
 ## What this repo is
 
-A community signal monitor for **ProxyRank.ai** — an MCP server and CLI tool audit platform. The monitor polls Hacker News, Reddit, and X/Twitter for relevant keywords, drafts developer-friendly replies using Grok, and routes them to Telegram/Discord for human review before posting.
+A community signal monitor for **ProxyRank.ai** — an MCP server and CLI tool audit platform. The monitor polls Hacker News, Reddit, and X/Twitter for relevant keywords, drafts developer-friendly replies using Grok, and routes them to Discord for human review before posting.
 
 ## Running the monitor
 
@@ -50,25 +50,19 @@ Everything lives in a single file: `community_monitor.py`.
 1. `run_monitor()` fetches hits from HN (`_fetch_hn`), Reddit (`_fetch_reddit`), X (`_fetch_x`)
 2. Hits are filtered (keyword must appear in title, EXCLUDE_KEYWORDS checked), deduped, capped at `MAX_HITS_PER_RUN = 5`
 3. Each hit gets a Grok-drafted reply via `draft_reply()`
-4. Hits are sent to `CommunityBot` (Telegram) and/or `DiscordBot` for human review
-
-**Approval flow — Telegram (`CommunityBot`):**
-- Sends inline buttons: ✅ Stuur / ✍️ Aanpassen / ❌ Overslaan
-- Long-polls Telegram in a background daemon thread
-- "Aanpassen" prompts free-text tweak instruction, regenerates via Grok
-- "Stuur" calls `_do_post()` which auto-posts to X or sends copy-paste text for Reddit/HN
+4. Hits are sent to `DiscordBot` for human review (Telegram `CommunityBot` removed 2026-10-28)
 
 **Approval flow — Discord (`DiscordBot`):**
 - Posts a card message + draft as a reply
 - Polls channels every 3 seconds for reply commands: `send`, `skip`, `tweak: instruction`
-- Same `_do_post()` logic
+- `_do_post()` auto-posts to X or sends copy-paste text for Reddit/HN
 
 **X posting:** Uses custom OAuth 1.0a signing (`_x_oauth1_header`) — no third-party OAuth library. Requires all four `X_API_KEY / X_API_SECRET / X_ACCESS_TOKEN / X_ACCESS_SECRET` vars; falls back to copy-paste if any are missing.
 
 **State persistence:**
 - `community_state.json` — seen post UIDs (dedup across runs)
-- `community_sessions_state.json` — pending Telegram approval sessions (survives restarts)
 - `discord_sessions_state.json` — pending Discord sessions
+- `community_sessions_state.json` — legacy Telegram sessions; no longer read. Pending Telegram approvals are dropped (not migrated): the file is left in place as an archive and can be deleted once reviewed. Hits that were only pending on Telegram will not re-surface (their UIDs are in `community_state.json`).
 
 All writes are atomic (write to `.tmp` then `os.rename`).
 
@@ -76,7 +70,7 @@ All writes are atomic (write to `.tmp` then `os.rename`).
 
 Copy `.env.example` to `.env`. Required:
 - `GROK_API_KEY` — reply drafting (grok-3)
-- `TELEGRAM_BOT_TOKEN_COMMUNITY_MONITOR` + `TELEGRAM_CHAT_ID` (group, negative number)
+- `DISCORD_BOT_TOKEN` + `DISCORD_CHANNEL_ID` (or `DISCORD_CHANNEL_ID_HN` / `_REDDIT` / `_X`)
 
 Optional:
 - `X_BEARER_TOKEN` — enables X search (read-only)
